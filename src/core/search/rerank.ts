@@ -28,6 +28,7 @@ import type { SearchResult } from '../types.ts';
 import { rerank as gatewayRerank, RerankError, type RerankInput, type RerankResult } from '../ai/gateway.ts';
 import { BudgetExhausted } from '../budget/budget-tracker.ts';
 import { logRerankFailure, type RerankFailureReason } from '../rerank-audit.ts';
+import { estimateTokens } from '../chunkers/token-estimate.ts';
 import { warnOncePerProcess } from '../utils.ts';
 
 /** #4648: the two audited success-shaped pass-through causes. */
@@ -85,6 +86,22 @@ function classifyRerankFailure(err: unknown): RerankFailureReason {
   return 'unknown';
 }
 
+// cl100k estimate; Qwen-family tokenizers run ~35% worse on hex-heavy text, so
+// 1400 here stays under a 2048-token reranker batch with margin.
+const RERANK_MAX_DOC_TOKENS = 1400;
+const RERANK_MAX_DOC_CHARS = 6000;
+
+/** Trim a reranker document to ~RERANK_MAX_DOC_TOKENS (char cap first, then shrink by measured ratio). */
+export function capRerankDoc(text: string): string {
+  let doc = text.slice(0, RERANK_MAX_DOC_CHARS);
+  for (let i = 0; i < 4; i++) {
+    const tokens = estimateTokens(doc);
+    if (tokens <= RERANK_MAX_DOC_TOKENS) break;
+    doc = doc.slice(0, Math.floor(doc.length * (RERANK_MAX_DOC_TOKENS / tokens) * 0.95));
+  }
+  return doc;
+}
+
 /**
  * Reorder the top `topNIn` results by reranker relevance score. The
  * un-reranked tail (any rows past topNIn) preserves its original RRF
@@ -112,7 +129,11 @@ export async function applyReranker(
   // Document text — chunk_text is the matched span. Fall back to title if
   // empty (shouldn't happen in practice; defensive). Empty docs would
   // confuse the reranker, but we still send them — the upstream model decides.
-  const documents = head.map(r => r.chunk_text || r.title || '');
+  // Cap each document so a self-hosted reranker (llama-server, TEI) with a
+  // small physical batch never 500s on an oversized code/hex-heavy chunk;
+  // hosted rerankers truncate server-side anyway. Token-aware, not just
+  // char-capped, because hex-dense pages tokenize at ~1 char/token.
+  const documents = head.map(r => capRerankDoc(r.chunk_text || r.title || ''));
 
   let reranked: RerankResult[];
   try {
