@@ -318,6 +318,10 @@ concept pages (e.g. "captive-portal", "channel-pricing-strategy") — never
 entity or brand names. Use the same label for the same topic across atoms;
 prefer a label you already used over coining a near-synonym.
 
+If the transcript has no extractable idea (metadata rows, status dumps,
+empty fields, boilerplate), output exactly [] — never invent an atom and
+never explain in prose.
+
 Output ONLY the JSON array, no prose.`;
 
 interface DiscoveredPage {
