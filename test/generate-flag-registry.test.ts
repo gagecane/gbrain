@@ -55,6 +55,7 @@ const LONGMEMEVAL_FLAGS = [
   '--yes',
   '--judge-concurrency',
   '--allow-incomplete-judgments',
+  '--search-pin',
 ];
 
 /** Real `gbrain agent register` flags (src/commands/agent-register.ts parseArgs / help). */

@@ -182,6 +182,8 @@ interface ParsedArgs {
   expansionReplayPath?: string;
   /** undefined = not pinned (config/bundle decides); null = legacy weighting. */
   expansionVariantBudget?: number | null;
+  /** --search-pin key=value (repeatable): extra `search.*` config pins written before the run and folded into the knobs hash. */
+  searchPins?: Record<string, string>;
   topK: number;
   outputPath?: string;
   mode?: SearchMode;
@@ -253,6 +255,17 @@ const LME_FLAGS: LmeFlag[] = [
       'Implies --expansion. A question_id missing from FILE is an error row',
       '(`expansion_replay_miss`) and the run exits 1 at the end.'],
     apply: (o, v) => { o.expansionReplayPath = v; o.expansion = true; } },
+  { name: '--search-pin', arg: 'KEY=VALUE', help: [
+      'Pin an arbitrary `search.*` config key for the run (repeatable; last wins).',
+      'Generic pass-through for knob A/Bs (e.g. search.metadata_boost_gate=lexical);',
+      'the value is written via engine.setConfig and folds into the knobs hash.'],
+    apply: (o, v) => {
+      const eq = v.indexOf('=');
+      if (eq <= 0) throw new Error(`--search-pin takes KEY=VALUE (got: ${v})`);
+      const key = v.slice(0, eq).trim(); const val = v.slice(eq + 1).trim();
+      if (!key.startsWith('search.') || key === 'search.' || val.length === 0) throw new Error(`--search-pin key must start with "search." and carry a non-empty value (got: ${v})`);
+      o.searchPins = { ...(o.searchPins ?? {}), [key]: val };
+    } },
   { name: '--expansion-variant-budget', arg: 'B', help: [
       'Pin `search.expansion_variant_budget`: `legacy` (every RRF list weight 1)',
       'or a number in (0, 4] — the total RRF weight shared equally by all',
@@ -530,7 +543,9 @@ interface QuestionOutcome {
 
 /** Resolve the pins for this run from flags + the injected snapshot (no engine read). */
 function resolvePins(opts: ParsedArgs, runOpts: RunOpts, trajectoryEnabled: boolean): { pins: RetrievalPins; knobs: ResolvedSearchKnobs } {
-  const snapshot = runOpts.searchConfigSnapshot ?? {};
+  // Generic --search-pin entries ride the same override plane as the injected snapshot (explicit pins win),
+  // so knobs_hash / retrieval_config_hash reflect them.
+  const snapshot = { ...(runOpts.searchConfigSnapshot ?? {}), ...(opts.searchPins ?? {}) };
   const knobs = resolveSearchMode({
     mode: opts.mode ?? snapshot['search.mode'],
     overrides: loadOverridesFromConfig(snapshot),
@@ -1090,6 +1105,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     if (opts.mode) await engine.setConfig('search.mode', opts.mode);
     if (opts.reranker !== undefined) await engine.setConfig('search.reranker.enabled', opts.reranker ? 'true' : 'false');
     if (opts.autocut !== undefined) await engine.setConfig('search.autocut', opts.autocut ? 'true' : 'false');
+    for (const [k, v] of Object.entries(opts.searchPins ?? {})) await engine.setConfig(k, v);
     if (opts.expansionVariantBudget !== undefined) {
       await engine.setConfig('search.expansion_variant_budget', opts.expansionVariantBudget === null ? 'legacy' : String(opts.expansionVariantBudget));
     }

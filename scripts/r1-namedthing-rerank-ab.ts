@@ -471,6 +471,8 @@ interface Args {
   autocut?: 'on' | 'off';
   /** --relational-pin N|off — overlays search.relational_rerank_pin on BOTH arms (default: gbrain's bundle default). */
   relationalPin?: string;
+  /** --search-pin KEY=VALUE (repeatable) — arbitrary search.* overlay on BOTH arms. */
+  searchPins?: Record<string, string>;
   json: boolean;
   out?: string;
   embedCache?: string;
@@ -481,7 +483,7 @@ interface Args {
 
 function usage(code: number): never {
   process.stderr.write(
-    'usage: bun run scripts/r1-namedthing-rerank-ab.ts [--json] [--out receipt.json] [--embed-cache PATH] [--relational] [--limit 10] [--stub-embed] [--autocut on|off] [--relational-pin N|off]\n',
+    'usage: bun run scripts/r1-namedthing-rerank-ab.ts [--json] [--out receipt.json] [--embed-cache PATH] [--relational] [--limit 10] [--stub-embed] [--autocut on|off] [--relational-pin N|off] [--search-pin KEY=VALUE]\n',
   );
   process.exit(code);
 }
@@ -502,6 +504,7 @@ export function parseArgs(argv: string[]): Args {
     else if (x === '--relational') a.relational = true;
     else if (x === '--out') a.out = need(i++, x);
     else if (x === '--embed-cache') a.embedCache = need(i++, x);
+    else if (x === '--search-pin') { const v = need(i++, x); const eq = v.indexOf('='); const key = eq > 0 ? v.slice(0, eq).trim() : ''; const val = eq > 0 ? v.slice(eq + 1).trim() : ''; if (!key.startsWith('search.') || key === 'search.' || !val) { process.stderr.write(`--search-pin takes search.<key>=<value> (got ${v})\n`); usage(2); } a.searchPins = { ...(a.searchPins ?? {}), [key]: val }; }
     else if (x === '--relational-pin') { const v = need(i++, x); if (!/^(off|[0-9]|10)$/.test(v)) { process.stderr.write(`--relational-pin takes 0-10 or off (got ${v})\n`); usage(2); } a.relationalPin = v; }
     else if (x === '--autocut') { const v = need(i++, x); if (v !== 'on' && v !== 'off') { process.stderr.write(`--autocut takes on|off (got ${v})\n`); usage(2); } a.autocut = v as 'on' | 'off'; }
     else if (x === '--limit') {
@@ -600,6 +603,7 @@ async function main(): Promise<void> {
       {
         ...(args.autocut === 'on' ? { 'search.autocut': 'true' } : args.autocut === 'off' ? { 'search.autocut': 'false' } : {}),
         ...(args.relationalPin !== undefined ? { 'search.relational_rerank_pin': args.relationalPin } : {}),
+        ...(args.searchPins ?? {}),
       };
     await applyArmPins(engine, 'off', overlay);
     const off = await runArm(engine, 'off', questions, { limit: args.limit });
