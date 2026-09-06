@@ -394,6 +394,7 @@ export function buildRow(input: BuildRowInput): LongMemEvalRow {
       : {}),
     gold_total: score.gold_total,
     gold_found: score.gold_found,
+    answer_session_ids: goldRaw,
     distinct_sessions_in_top_k: score.distinct_sessions_in_top_k,
     retrieved,
     retrieved_session_ids: distinctRetrievedSessions(results, slugToRaw).map(s => s.session_id),

@@ -68,8 +68,15 @@ command runs through `scripts/eval-spend-guard.sh 75 <estimate> -- …`
   (receipts running). Decision rule: the largest budget within 1 question of
   the best on the 40, then A3′ / A3′R on the 430.
 - **Autocut floor replay (A4 `--capture-pool` capture; floors off / 0.10 /
-  0.20 / 0.35 / 0.50 / 0.65 / 0.80; `--validate-live 0.35` must agree
-  byte-for-byte before any other cell is read):** pending (receipts running).
+  0.20 / 0.35 / 0.50 / 0.65 / 0.80; `--validate-live 0.35` reproduced all
+  500 live decisions):** A4 (shipped default: reranker on, autocut 0.35)
+  379/470 vs A2 (autocut off) 449/470, paired +0 / −68 on the 430 decision
+  set (multi-session −22, temporal −27, knowledge-update −19). Replay over
+  the 500 captured rows: off 475 → 0.35 399 → 0.50 413 → 0.65 444 → 0.80
+  466 (−9, all knowledge-update); same shape on both seeded halves; any-hit
+  ≥ 99.4% at every floor; mean returned tokens 3256 (off) → 1633 (0.35).
+  Rule R2 FAILED at every floor → **autocut OFF in balanced and tokenmax**
+  (`DEFAULT_AUTOCUT` unchanged for operators who re-enable it).
 - **Judged QA accuracy (`--judge`, `openai:gpt-4o` judge with the official
   prompts at temperature 0; reader = the shipped default pipeline;
   `--no-trajectory`):** pending (receipts running). Published only once

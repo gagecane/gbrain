@@ -306,9 +306,8 @@ export interface ModeBundle {
   contextual_retrieval_disabled: boolean;
 
   /**
-   * v0.42.3.0 — autocut (score-discontinuity result-sizing). Default OFF for
-   * conservative (no reranker → no trustworthy cliff signal; would no-op
-   * anyway), ON for balanced + tokenmax. When on AND a reranker scored ≥2
+   * autocut (score-discontinuity result-sizing). OFF in every bundle: conservative has no reranker (no cliff
+   * signal); balanced/tokenmax turned it off on the ranker wave's rule R2 receipt (balanced note). When on AND a reranker scored ≥2
    * items, hybridSearch cuts the ranked set at the largest cross-encoder
    * rerank-score gap (instead of returning the full top-K). No-op without a
    * reranker. Override path: per-call SearchOpts.autocut → `search.autocut`
@@ -535,8 +534,9 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // per the cost-tier philosophy.
     contextual_retrieval: 'title' as CRMode,
     contextual_retrieval_disabled: false,
-    // v0.42.3.0 — autocut ON (reranker fires; cliff signal is trustworthy).
-    autocut: true,
+    // autocut OFF (ranker wave, rule R2): the post-rerank cliff dropped the second gold session on
+    // multi-part questions (LME recall_all@5 449→379/470; no floor in {0.10..0.80} passed). `search.autocut true` re-enables.
+    autocut: false,
     // v0.43 — relational recall ON (contingent on the no-regression gate;
     // ships default-false everywhere if the gate flags any regression).
     relationalRetrieval: true,
@@ -598,8 +598,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // 10K-page brain; documented in the post-upgrade cost prompt.
     contextual_retrieval: 'per_chunk_synopsis' as CRMode,
     contextual_retrieval_disabled: false,
-    // v0.42.3.0 — autocut ON.
-    autocut: true,
+    // autocut OFF (ranker wave, rule R2 — see the balanced bundle's note).
+    autocut: false,
     // v0.43 — relational recall ON for tokenmax (max-recall tier).
     relationalRetrieval: true,
     relational_retrieval_depth: 2,

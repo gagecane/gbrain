@@ -56,7 +56,15 @@ gbrain config set search.metadata_boost_gate always   # pre-wave boosts
   (`all_hit`/`all_rate`/`any_hit`/`any_rate` per type); `recall_hit` on each
   row is a deprecated alias of `recall_any_hit`.
 - **If you run `tokenmax`:** <!-- TBD Phase A: outcome of the expansion budget flip (A3′/A3′R rule) -->
-- **Autocut floor:** <!-- TBD Phase C: R2 decision from the A4 capture replay -->
+- **Autocut is off by default in `balanced` and `tokenmax`.** The
+  score-discontinuity cut that ran after the reranker halved the returned
+  window on average, and the pre-registered replay showed where the saving
+  came from: on questions whose answer spans more than one session it kept
+  the top session and dropped the rest (LongMemEval strict `recall_all@5`
+  449/470 with the reranker alone vs 379/470 with the cut; no floor in the
+  sweep recovered it). `gbrain config set search.autocut true` re-enables it
+  with the same knobs; the returned-token saving is real if your questions
+  are single-fact lookups.
 - The relational pin trusts your graph. A stale or wrong edge now puts up to
   three edge pages at the top of the results instead of one at the end of
   page 1; `gbrain config set search.relational_rerank_pin off` if that bites.
@@ -85,6 +93,13 @@ gbrain config set search.metadata_boost_gate always   # pre-wave boosts
   byte-identical. The stretch (bare vector) is not met and is filed. The
   competing mechanism, an arm-confidence floor that down-weights a weak
   keyword arm, moved the held-out score 53.0 → 53.0 and ships off.
+- **Autocut floor (rule R2 closeout).** Replayed from the shipped default's
+  captured post-rerank pool (500 rows, live decisions reproduced exactly):
+  off 475 → 0.35 399 → 0.50 413 → 0.65 444 → 0.80 466 strict hits, the
+  losses concentrated in multi-session, temporal-reasoning and
+  knowledge-update; any-hit ≥ 99.4% at every floor; mean returned window
+  3256 → 1633 estimated tokens at 0.35. No floor met the guardrail on either
+  seeded half, so autocut is off in balanced and tokenmax.
 - **Temporal reasoning: located, not fixed.** Every missed gold session on
   the diagnosis half sits at vector rank 6–15 and fuses at exactly that rank;
   the loss is the embedding ranking of near-duplicate sessions, not fusion,
@@ -160,7 +175,8 @@ gbrain config set search.metadata_boost_gate always   # pre-wave boosts
   are accepted (they were rejected as unknown before). The `eval` row remains a
   union across eval subcommands.
 - **Bundle defaults:** `relational_rerank_pin` 3 and `metadata_boost_gate`
-  `lexical` in `conservative`, `balanced` and `tokenmax`. <!-- TBD Phase A/C: expansion budget, autocut floor -->
+  `lexical` in `conservative`, `balanced` and `tokenmax`; `autocut` off in
+  `balanced` and `tokenmax` (`DEFAULT_AUTOCUT` unchanged). <!-- TBD Phase A: expansion budget -->
 - **`--by-type-floor`** gates on `recall_all` by default (see Things to watch).
 - `docs/eval-bench.md`, `docs/architecture/RETRIEVAL.md`, `docs/guides/search-modes.md`
   and `docs/eval/SEARCH_MODE_METHODOLOGY.md` describe the harness as the

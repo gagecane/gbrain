@@ -421,6 +421,31 @@ describe('scripts/replay-autocut-floor.ts (CLI)', () => {
       expect(r4.status).toBe(2);
       expect(r4.stderr).toContain('--validate-live takes exactly one floor (got 2');
       expect(r4.stdout).toBe(''); // nothing was replayed
+
+      // Harness capture rows carry gold COUNTS (gold_total / gold_found), not
+      // the ids. Without --dataset such a capture must be refused — scoring
+      // against an empty gold set printed 0% recall at every floor once.
+      const noGold = rows.map(({ answer_session_ids: _drop, ...rest }) => ({ ...rest, gold_total: _drop.length }));
+      const noGoldFile = join(dir, 'nogold.ndjson');
+      writeFileSync(noGoldFile, noGold.map((r) => JSON.stringify(r)).join('\n') + '\n');
+      const r5 = spawnSync('bun', ['run', 'scripts/replay-autocut-floor.ts', noGoldFile, '--floors', 'off,0.35'], { cwd: process.cwd(), encoding: 'utf-8' });
+      expect(r5.status).toBe(1);
+      expect(r5.stderr).toContain('no capture row carries answer_session_ids');
+
+      // --dataset joins the gold by question_id (JSON array, the LongMemEval shape) → same scores as the self-contained capture.
+      const dsFile = join(dir, 'dataset.json');
+      writeFileSync(dsFile, JSON.stringify(rows.map((r) => ({ question_id: r.question_id, question_type: r.question_type, answer_session_ids: r.answer_session_ids, haystack_sessions: [] }))));
+      const r6 = spawnSync('bun', ['run', 'scripts/replay-autocut-floor.ts', noGoldFile, '--dataset', dsFile, '--floors', 'off,0.35,0.65', '--k', '5', '--json'], { cwd: process.cwd(), encoding: 'utf-8' });
+      expect(r6.status).toBe(0);
+      const out6 = JSON.parse(r6.stdout);
+      expect(out6.summaries[0].recall_all_hit).toBe(2);
+      expect(out6.summaries[1].recall_all_hit).toBe(1);
+
+      // A capture question missing from the dataset is an error, not a silent zero.
+      writeFileSync(dsFile, JSON.stringify([{ question_id: 'q1', answer_session_ids: ['S0', 'S2'] }]));
+      const r7 = spawnSync('bun', ['run', 'scripts/replay-autocut-floor.ts', noGoldFile, '--dataset', dsFile, '--floors', 'off,0.35'], { cwd: process.cwd(), encoding: 'utf-8' });
+      expect(r7.status).toBe(1);
+      expect(r7.stderr).toContain('1 capture row(s) have no question in');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

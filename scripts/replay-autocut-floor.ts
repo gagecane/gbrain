@@ -10,7 +10,7 @@
  *
  * Usage:
  *   bun run scripts/replay-autocut-floor.ts <capture.ndjson> \
- *     --floors off,0.10,0.20,0.35,0.50,0.65,0.80 [--k 5] \
+ *     --floors off,0.10,0.20,0.35,0.50,0.65,0.80 [--dataset <longmemeval json>] [--k 5] \
  *     [--validate-live 0.35] [--split-half seed42] [--jump 0.2] [--min-keep 1] [--json]
  *
  * Exit: 0 ok · 1 validate-live mismatch or bad input · 2 usage.
@@ -31,7 +31,7 @@ import {
 
 function usage(code: number): never {
   process.stderr.write(
-    'usage: bun run scripts/replay-autocut-floor.ts <capture.ndjson> --floors off,0.10,0.35 [--k 5] ' +
+    'usage: bun run scripts/replay-autocut-floor.ts <capture.ndjson> --floors off,0.10,0.35 [--dataset longmemeval.json] [--k 5] ' +
       '[--validate-live 0.35] [--split-half <seed>] [--jump 0.2] [--min-keep 1] [--json]\n',
   );
   process.exit(code);
@@ -39,6 +39,8 @@ function usage(code: number): never {
 
 interface Args {
   file: string;
+  /** LongMemEval dataset (JSON array or ndjson) supplying `answer_session_ids` per question_id when the capture rows carry none. */
+  dataset?: string;
   floors: Floor[];
   k: number;
   validateLive?: Floor;
@@ -49,6 +51,7 @@ interface Args {
 
 function parseArgs(argv: string[]): Args {
   let file: string | undefined;
+  let dataset: string | undefined;
   let floorsSpec: string | undefined;
   let k = 5;
   let validate: Floor | undefined;
@@ -79,6 +82,7 @@ function parseArgs(argv: string[]): Args {
       validate = floors[0];
     }
     else if (a === '--split-half') splitSeed = need(i++, a);
+    else if (a === '--dataset') dataset = need(i++, a);
     else if (a === '--jump') jumpRatio = Number(need(i++, a));
     else if (a === '--min-keep') minKeep = Number(need(i++, a));
     else if (a === '--json') json = true;
@@ -105,7 +109,9 @@ function parseArgs(argv: string[]): Args {
     process.stderr.write(`--min-keep must be a positive integer\n`);
     usage(2);
   }
-  return { file, floors: parseFloors(floorsSpec), k, validateLive: validate, splitSeed, knobs: { jumpRatio, minKeep }, json };
+  return {
+    file,
+    dataset, floors: parseFloors(floorsSpec), k, validateLive: validate, splitSeed, knobs: { jumpRatio, minKeep }, json };
 }
 
 /** Every metric this script prints, as glossary keys (all carried by src/core/eval/metric-glossary.ts). */
@@ -138,6 +144,27 @@ function renderTable(title: string, summaries: FloorSummary[], out: string[]): v
   out.push('');
 }
 
+/** question_id → raw `answer_session_ids` from a LongMemEval dataset (JSON array or ndjson). */
+function loadGold(path: string): Map<string, string[]> {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf-8');
+  } catch (err) {
+    throw new Error(`cannot read dataset ${path}: ${(err as Error).message}`);
+  }
+  const items: unknown[] = raw.trimStart().startsWith('[')
+    ? (JSON.parse(raw) as unknown[])
+    : raw.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as unknown);
+  const out = new Map<string, string[]>();
+  for (const it of items) {
+    const o = it as { question_id?: unknown; answer_session_ids?: unknown };
+    if (typeof o.question_id !== 'string') continue;
+    out.set(o.question_id, Array.isArray(o.answer_session_ids) ? (o.answer_session_ids as string[]) : []);
+  }
+  if (out.size === 0) throw new Error(`dataset ${path} has no question rows`);
+  return out;
+}
+
 function main(): void {
   const args = parseArgs(process.argv.slice(2));
   let text: string;
@@ -156,6 +183,34 @@ function main(): void {
   }
   if (parsed.rows.length === 0) {
     process.stderr.write('replay-autocut-floor: no question rows with rerank_pool found\n');
+    process.exit(1);
+  }
+  // Gold join. Harness capture rows carry `gold_total` / `gold_found`, not the
+  // gold ids themselves; `--dataset` supplies `answer_session_ids` (raw ids —
+  // the pool rows' `session_id` is raw too). Scoring recall against an empty
+  // gold set would print 0% everywhere, so a capture with no gold anywhere and
+  // no dataset is refused rather than silently mis-scored.
+  if (args.dataset) {
+    let gold: Map<string, string[]>;
+    try {
+      gold = loadGold(args.dataset);
+    } catch (err) {
+      process.stderr.write(`replay-autocut-floor: ${(err as Error).message}\n`);
+      process.exit(1);
+    }
+    let missing = 0;
+    for (const row of parsed.rows) {
+      if (row.answer_session_ids.length > 0) continue;
+      const g = gold.get(row.question_id);
+      if (g) row.answer_session_ids = g;
+      else missing++;
+    }
+    if (missing > 0) {
+      process.stderr.write(`replay-autocut-floor: ${missing} capture row(s) have no question in ${args.dataset}\n`);
+      process.exit(1);
+    }
+  } else if (parsed.rows.every((r) => r.answer_session_ids.length === 0)) {
+    process.stderr.write('replay-autocut-floor: no capture row carries answer_session_ids — pass --dataset <longmemeval json> to join the gold session ids\n');
     process.exit(1);
   }
 

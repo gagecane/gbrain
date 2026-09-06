@@ -375,7 +375,8 @@ pins the reranker and autocut per run (see "Download and run" and "Flags").
 against my gbrain retrieval"* (no skill backs this; your agent runs
 `gbrain eval longmemeval <dataset> --retrieval-only --top-k 5 --by-type --no-trajectory --mode balanced --reranker off --autocut off`)
 — *"Run LongMemEval at my brain's shipped default search path"* (your agent runs
-the same command with `--reranker on --autocut on`).
+the same command with `--reranker on --autocut off`, the release default; add
+`--autocut on --capture-pool` to reproduce the autocut floor replay).
 
 ### Current measured result
 
@@ -498,13 +499,13 @@ gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
   --mode balanced --reranker off --autocut off \
   --output ~/lme-receipts/hybrid.ndjson
 
-# The shipped default path (what balanced/tokenmax run: reranker on, autocut on).
+# The shipped default path (what balanced/tokenmax run: reranker on, autocut off since v0.48.3.0).
 # --reranker on preflights reranker readiness (exit 2 with the fix if it cannot
 # run) and fails the run if any row fell through un-reranked. Note the 95.32%
 # row above was reranker on with autocut OFF (`--reranker on --autocut off`).
 gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
   --retrieval-only --top-k 5 --by-type --no-trajectory \
-  --mode balanced --reranker on --autocut on \
+  --mode balanced --reranker on --autocut off \
   --output ~/lme-receipts/default.ndjson
 
 # Embeddings are cached content-addressed at ~/.cache/gbrain-eval/longmemeval-embed.sqlite

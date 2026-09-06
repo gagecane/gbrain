@@ -287,8 +287,19 @@ operator knob only.
 
 ### Autocut: score-discontinuity result-sizing
 
-Default-on for `balanced` and `tokenmax` (off for `conservative`, which has no
-reranker and therefore no trustworthy cliff signal). `applyAutocut`
+Off by default in every bundle. It shipped on for `balanced` and `tokenmax`
+until the ranker wave's pre-registered rule R2 measured it on LongMemEval from
+the shipped default's captured post-rerank pool: with the reranker on, the
+score cliff after the top session is the normal shape on multi-part questions,
+and the cut removed the second gold session — strict `recall_all@5` 449/470 →
+379/470 (−68 paired on the 430-question decision set), with no floor in the
+sweep {0.10 … 0.80} within two questions of "off" on either seeded half
+(0.80 still lost 9, all knowledge-update). Any-hit stayed ≥ 99.4% throughout:
+autocut keeps the best session and drops the rest, which is a token saving
+(mean returned window 3256 → 1633 estimated tokens at 0.35) paid for with the
+questions that need more than one session. `gbrain config set search.autocut
+true` re-enables it with the knobs below; a session-aware cut (never below k
+distinct sessions) is the filed follow-up. `applyAutocut`
 (`src/core/search/autocut.ts`) cuts the ranked set at the largest
 cross-encoder rerank-score cliff, before the limit slice, first page only.
 Never-empty failsafe (`minKeep`), no-op when fewer than 2 results carry a
@@ -317,7 +328,7 @@ Each stage is testable in isolation. Each stage is replaceable. The whole pipeli
 # the like-for-like row pins the reranker and autocut off.
 gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
   --retrieval-only --top-k 5 --by-type --no-trajectory --mode balanced --reranker off --autocut off
-# The shipped default path (what balanced/tokenmax run): --reranker on --autocut on
+# The shipped default path (what balanced/tokenmax run): --reranker on --autocut off
 
 # Capture your own queries and replay against retrieval changes
 export GBRAIN_CONTRIBUTOR_MODE=1

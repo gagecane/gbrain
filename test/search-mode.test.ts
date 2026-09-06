@@ -121,8 +121,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       graph_signals: true,
       ...CR_DISABLED_DEFAULT,
       contextual_retrieval: 'title',
-      // v0.42.3.0 — autocut ON.
-      autocut: true,
+      // autocut OFF since the ranker wave (rule R2 receipt).
+      autocut: false,
       autocut_jump: 0.2,
       autocut_min_top: 0.35,
       autocut_min_keep: 1,
@@ -162,8 +162,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       graph_signals: true,
       ...CR_DISABLED_DEFAULT,
       contextual_retrieval: 'per_chunk_synopsis',
-      // v0.42.3.0 — autocut ON.
-      autocut: true,
+      // autocut OFF since the ranker wave (rule R2 receipt).
+      autocut: false,
       autocut_jump: 0.2,
       autocut_min_top: 0.35,
       autocut_min_keep: 1,
@@ -752,10 +752,10 @@ describe('v0.42.3.0 — autocut knobs', () => {
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
-  test('bundle defaults: conservative off, balanced/tokenmax on @0.20', () => {
+  test('bundle defaults: autocut off in every bundle (ranker wave rule R2), jump 0.20 kept for operators who re-enable it', () => {
     expect(MODE_BUNDLES.conservative.autocut).toBe(false);
-    expect(MODE_BUNDLES.balanced.autocut).toBe(true);
-    expect(MODE_BUNDLES.tokenmax.autocut).toBe(true);
+    expect(MODE_BUNDLES.balanced.autocut).toBe(false);
+    expect(MODE_BUNDLES.tokenmax.autocut).toBe(false);
     for (const m of ['conservative', 'balanced', 'tokenmax'] as const) {
       expect(MODE_BUNDLES[m].autocut_jump).toBe(0.2);
     }
@@ -793,9 +793,10 @@ describe('v0.42.3.0 — autocut knobs', () => {
   });
 
   test('knobsHash includes ac= / acj= — autocut-on vs off differ', () => {
-    const on = knobsHash(resolveSearchMode({ mode: 'balanced' })); // autocut true
-    const off = knobsHash(resolveSearchMode({ mode: 'balanced', perCall: { autocut: false } }));
+    const off = knobsHash(resolveSearchMode({ mode: 'balanced' })); // autocut false (bundle default)
+    const on = knobsHash(resolveSearchMode({ mode: 'balanced', perCall: { autocut: true } }));
     expect(on).not.toBe(off);
+    expect(knobsHash(resolveSearchMode({ mode: 'balanced', perCall: { autocut: false } }))).toBe(off);
   });
 
   test('knobsHash differs on jump sensitivity', () => {
