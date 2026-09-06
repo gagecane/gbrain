@@ -193,7 +193,7 @@ describe('--judge live run + --judge --resume-from backfill', () => {
     expect(judge.calls).toHaveLength(3);
     for (const c of judge.calls) {
       expect(c.temperature).toBe(0);
-      expect(c.maxTokens).toBe(10);
+      expect(c.maxTokens).toBe(16); // provider minimum (official prompt asks 10; one-token verdict unaffected)
       expect(c.model).toBe('openai:gpt-4o');
       expect(c.messages).toHaveLength(1);
     }

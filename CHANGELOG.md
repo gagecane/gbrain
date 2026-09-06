@@ -215,11 +215,13 @@ is in `docs/eval-bench.md`.
   `evals/longmemeval/`.
 - **Judged answer-accuracy lane** (`--judge`, `--judge-model`, `--max-usd`,
   `--yes`, `--judge-concurrency`, `--allow-incomplete-judgments`): the official
-  `evaluate_qa.py` prompts per question type at temperature 0 with gpt-4o,
+  `evaluate_qa.py` prompts per question type at temperature 0 with gpt-4o (max_tokens 16 — the provider minimum; the official 10 is rejected by the OpenAI API and a one-token verdict is unaffected),
   `judge_error` distinct from incorrect, budget soft-stop, judge-only backfill
   on `--resume-from`, headline scores every ungradable row as incorrect. The
   reader prompt adds an abstention instruction (a disclosed deviation from the
-  official reading prompt). `ChatOpts.temperature` reaches the gateway transport.
+  official reading prompt) and the reader reads the FULL text of every distinct
+  retrieved session (the sanitizer's 4000-char extractor cap no longer applies
+  to it; each row records the context size). `ChatOpts.temperature` reaches the gateway transport.
 - **Metric glossary:** `recall_all@k`, `recall_any@k`, `qa_accuracy`.
 - **Scripts:** `scripts/eval-spend-guard.sh` (fail-closed paid-run ledger with
   a cap), `scripts/replay-autocut-floor.ts` (floor sweep from a captured pool,

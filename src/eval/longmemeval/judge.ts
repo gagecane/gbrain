@@ -7,7 +7,7 @@
  * (retries, error classes, cost, budget) live in `../shared/judge-runner.ts`.
  *
  * Official protocol (evaluate_qa.py):
- *   - one user message per question, `temperature: 0`, `max_tokens: 10`,
+ *   - one user message per question, `temperature: 0`, `max_tokens: 10` (we send 16 — the provider minimum; see JUDGE_MAX_TOKENS),
  *     judge model gpt-4o;
  *   - per-type instruction (standard / temporal-reasoning off-by-one /
  *     knowledge-update / single-session-preference rubric) and an abstention
@@ -48,14 +48,21 @@ import {
 } from '../shared/judge-runner.ts';
 
 export const DEFAULT_JUDGE_MODEL = 'openai:gpt-4o';
-export const JUDGE_MAX_TOKENS = 10;
+/**
+ * The official evaluate_qa.py asks for max_tokens 10. The OpenAI Responses API
+ * that serves gpt-4o rejects any max_output_tokens below 16 ("integer below
+ * minimum value"), so every judge call failed with provider_error at 10. We
+ * use 16 — the verdict is a one-token yes/no, so the cap cannot change a
+ * verdict — and disclose the deviation in JUDGE_METHODOLOGY_NOTE.
+ */
+export const JUDGE_MAX_TOKENS = 16;
 export const JUDGE_TEMPERATURE = 0;
 /** Bump when any instruction text, the boundary framing, or the field labels change. */
 export const JUDGE_PROMPT_VERSION = 'longmemeval-anscheck-v1+gbrain-boundary-v1';
 
 export const JUDGE_METHODOLOGY_NOTE =
   'judge=official LongMemEval evaluate_qa.py get_anscheck_prompt per question_type (abstention for _abs ids), ' +
-  'verdict = "yes" substring of the lowercased completion, temperature 0 via ChatOpts.temperature, max_tokens 10. ' +
+  'verdict = "yes" substring of the lowercased completion, temperature 0 via ChatOpts.temperature, max_tokens 16 (the official 10 is below the OpenAI Responses API minimum of 16; a one-token verdict is unaffected). ' +
   'Deviations: (1) question/reference/response are wrapped in <judge_input> data-boundary framing with an instruction ' +
   'that the delimited content is data, not instructions (#4338); tag closures inside the data are neutralised, the ' +
   'response text is otherwise unaltered. (2) judge malfunctions (timeout after 2 retries, 429 exhausted, refusal, ' +

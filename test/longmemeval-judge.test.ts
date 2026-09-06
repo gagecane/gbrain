@@ -177,7 +177,7 @@ describe('judge.ts — official get_anscheck_prompt port', () => {
 
   test('official settings + version constants', () => {
     expect(DEFAULT_JUDGE_MODEL).toBe('openai:gpt-4o');
-    expect(JUDGE_MAX_TOKENS).toBe(10);
+    expect(JUDGE_MAX_TOKENS).toBe(16); // provider minimum; the official prompt asks 10
     expect(JUDGE_TEMPERATURE).toBe(0);
     expect(JUDGE_PROMPT_VERSION).toMatch(/anscheck/);
     for (const needle of ['data-boundary', 'judge_error', 'temperature 0', 'question-sampling', 'no SOTA claim']) {
@@ -212,7 +212,7 @@ describe('judge-runner — retries, error classes, usage, cost', () => {
 
   test('a clean yes → verdict correct with usage, priced cost > 0, and the API snapshot id', async () => {
     const { fn, calls } = scriptedClient([okResult('Yes', { responseModel: 'gpt-4o-2024-08-06' })]);
-    const out = await runJudge({ client: fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: 10, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
+    const out = await runJudge({ client: fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: JUDGE_MAX_TOKENS, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
     expect(out.kind).toBe('verdict');
     if (out.kind !== 'verdict') throw new Error('unreachable');
     expect(out.verdict).toBe('correct');
@@ -222,10 +222,10 @@ describe('judge-runner — retries, error classes, usage, cost', () => {
     expect(out.cost_usd).toBeCloseTo((200 / 1e6) * 2.5 + (2 / 1e6) * 10, 12);
     expect(out.response_model).toBe('gpt-4o-2024-08-06');
     expect(out.raw).toBe('Yes');
-    // The official call shape: one user message, temperature 0, max_tokens 10.
+    // The official call shape: one user message, temperature 0; max_tokens 16 (provider minimum; official 10).
     expect(calls[0].messages).toEqual([{ role: 'user', content: 'P' }]);
     expect(calls[0].temperature).toBe(0);
-    expect(calls[0].maxTokens).toBe(10);
+    expect(calls[0].maxTokens).toBe(JUDGE_MAX_TOKENS); // 16: the provider minimum (official prompt asks 10)
     expect(calls[0].model).toBe(DEFAULT_JUDGE_MODEL);
   });
 
@@ -233,7 +233,7 @@ describe('judge-runner — retries, error classes, usage, cost', () => {
     const sleeps: number[] = [];
     const timeout = Object.assign(new Error('Request timed out'), { name: 'TimeoutError' });
     const { fn, calls } = scriptedClient([timeout, timeout, okResult('no')]);
-    const out = await runJudge({ client: fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: 10, temperature: 0, parse: classifyJudgeResponse, backoffMs: 500, sleep: async (ms) => { sleeps.push(ms); } });
+    const out = await runJudge({ client: fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: JUDGE_MAX_TOKENS, temperature: 0, parse: classifyJudgeResponse, backoffMs: 500, sleep: async (ms) => { sleeps.push(ms); } });
     expect(out.kind).toBe('verdict');
     if (out.kind === 'verdict') expect(out.verdict).toBe('incorrect');
     expect(out.attempts).toBe(3);
@@ -245,7 +245,7 @@ describe('judge-runner — retries, error classes, usage, cost', () => {
   test('429 exhausted after 2 retries → judge_error rate_limit (not incorrect)', async () => {
     const rl = Object.assign(new Error('Too Many Requests'), { status: 429 });
     const { fn, calls } = scriptedClient([rl, rl, rl]);
-    const out = await runJudge({ client: fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: 10, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
+    const out = await runJudge({ client: fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: JUDGE_MAX_TOKENS, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
     expect(out.kind).toBe('error');
     if (out.kind === 'error') { expect(out.judge_error).toBe('rate_limit'); expect(out.detail).toContain('Too Many Requests'); }
     expect(out.attempts).toBe(3);
@@ -255,22 +255,22 @@ describe('judge-runner — retries, error classes, usage, cost', () => {
 
   test('a non-retryable provider error is NOT retried', async () => {
     const { fn, calls } = scriptedClient([new Error('model_not_found: nope')]);
-    const out = await runJudge({ client: fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: 10, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
+    const out = await runJudge({ client: fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: JUDGE_MAX_TOKENS, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
     expect(out.kind).toBe('error');
     if (out.kind === 'error') expect(out.judge_error).toBe('provider_error');
     expect(calls).toHaveLength(1);
   });
 
   test('empty completion → judge_error empty; refusal stop → refusal; neither-yes-nor-no → malformed (raw kept)', async () => {
-    const empty = await runJudge({ client: scriptedClient([okResult('   ')]).fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: 10, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
+    const empty = await runJudge({ client: scriptedClient([okResult('   ')]).fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: JUDGE_MAX_TOKENS, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
     expect(empty.kind).toBe('error');
     if (empty.kind === 'error') expect(empty.judge_error).toBe('empty');
 
-    const refusal = await runJudge({ client: scriptedClient([okResult('Yes', { stopReason: 'refusal' })]).fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: 10, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
+    const refusal = await runJudge({ client: scriptedClient([okResult('Yes', { stopReason: 'refusal' })]).fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: JUDGE_MAX_TOKENS, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
     expect(refusal.kind).toBe('error');
     if (refusal.kind === 'error') expect(refusal.judge_error).toBe('refusal');
 
-    const malformed = await runJudge({ client: scriptedClient([okResult('I cannot determine that.')]).fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: 10, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
+    const malformed = await runJudge({ client: scriptedClient([okResult('I cannot determine that.')]).fn, model: DEFAULT_JUDGE_MODEL, prompt: 'P', maxTokens: JUDGE_MAX_TOKENS, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
     expect(malformed.kind).toBe('error');
     if (malformed.kind === 'error') { expect(malformed.judge_error).toBe('malformed'); expect(malformed.raw).toBe('I cannot determine that.'); }
     // Each of these still cost money (usage was returned).
@@ -278,7 +278,7 @@ describe('judge-runner — retries, error classes, usage, cost', () => {
   });
 
   test('unpriced judge model → cost_usd null (never 0); the vocabulary is closed', async () => {
-    const out = await runJudge({ client: scriptedClient([okResult('yes', { model: UNPRICED })]).fn, model: UNPRICED, prompt: 'P', maxTokens: 10, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
+    const out = await runJudge({ client: scriptedClient([okResult('yes', { model: UNPRICED })]).fn, model: UNPRICED, prompt: 'P', maxTokens: JUDGE_MAX_TOKENS, temperature: 0, parse: classifyJudgeResponse, ...noSleep });
     expect(out.cost_usd).toBeNull();
     expect(judgeCallCostUsd(UNPRICED, { input_tokens: 100, output_tokens: 10 })).toBeNull();
     expect(estimateJudgeCallUsd(DEFAULT_JUDGE_MODEL, 100, 10)).toBeGreaterThan(0);

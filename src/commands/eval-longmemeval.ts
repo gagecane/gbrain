@@ -1420,6 +1420,9 @@ async function runOneQuestion(
       reader_model_snapshot: answer.response_model,
       reader_prompt_sha: READER_PROMPT_SHA,
       reader_max_tokens: READER_MAX_TOKENS,
+      reader_context_chars: answer.context_chars,
+      reader_context_sessions: answer.context_sessions,
+      reader_sessions_truncated: answer.sessions_truncated,
     };
   }
 

@@ -30,8 +30,17 @@ import { sessionIdFromSlug, type SlugToRawMap } from './metrics.ts';
 import { sha256Hex } from './run-config.ts';
 
 export const READER_MAX_TOKENS = 512;
+/**
+ * Per-session character bound for the reader's <chat_session> blocks. The
+ * sanitizer's 4000-char default (built for the claim extractor) silently cut
+ * the answer out of most retrieved sessions — LongMemEval gold sessions run
+ * 5–23K chars, and the first judged dry run abstained on 11/25 questions whose
+ * gold session sat at rank 1. 60K is a safety bound above the longest session
+ * in the corpus; `reader_sessions_truncated` on the row says if it ever fires.
+ */
+export const READER_MAX_SESSION_CHARS = 60_000;
 
-export const READER_PROMPT_VERSION = 'gbrain-lme-reader-v2-abstention';
+export const READER_PROMPT_VERSION = 'gbrain-lme-reader-v3-abstention-fullsessions';
 
 export const READER_SYSTEM_TEXT =
   `You are answering a question about a long-running conversation between you (the assistant) ` +
@@ -88,6 +97,10 @@ export interface ReaderAnswer {
    * the provider echoed the requested id or reported nothing.
    */
   response_model: string | null;
+  /** Context construction receipt: rendered <chat_session> chars, distinct sessions, sessions cut by READER_MAX_SESSION_CHARS. */
+  context_chars: number;
+  context_sessions: number;
+  sessions_truncated: number;
 }
 
 export async function generateAnswer(
@@ -113,7 +126,7 @@ export async function generateAnswer(
       body: entry?.body ?? r.chunk_text,
     });
   }
-  const { rendered } = renderChatBlock(sessions);
+  const { rendered, truncatedCount } = renderChatBlock(sessions, { maxSessionChars: READER_MAX_SESSION_CHARS });
   const userText = buildReaderUserText({
     question: question.question,
     questionDate: typeof question.question_date === 'string' ? question.question_date : undefined,
@@ -130,8 +143,9 @@ export async function generateAnswer(
   const reported = typeof response.model === 'string' && response.model.length > 0 && response.model !== model
     ? response.model
     : null;
+  const receipt = { context_chars: rendered.length, context_sessions: sessions.length, sessions_truncated: truncatedCount };
   for (const block of response.content) {
-    if (block.type === 'text') return { text: block.text.trim(), response_model: reported };
+    if (block.type === 'text') return { text: block.text.trim(), response_model: reported, ...receipt };
   }
-  return { text: '', response_model: reported };
+  return { text: '', response_model: reported, ...receipt };
 }

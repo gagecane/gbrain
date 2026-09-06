@@ -541,6 +541,20 @@ gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
   --judge --judge-model openai:gpt-4o --max-usd 5 --yes \
   --output ~/lme-receipts/judged.ndjson
 
+**Protocol (v0.48.3.0).** Retrieval = the release default (`balanced`,
+reranker on, autocut off, k=5). Reader context = the FULL text of every
+distinct session among the top-5 retrieved chunk rows, wrapped in
+`<chat_session>` blocks (the sanitizer's 4000-char cap is an extractor-era
+default and does not apply to the reader; each row records
+`reader_context_chars`, `reader_context_sessions`, `reader_sessions_truncated`).
+Reader `max_tokens` 512 with an abstention instruction (disclosed deviation
+from the official reading prompt). Judge `openai:gpt-4o`, official
+`evaluate_qa.py` prompt per question type, temperature 0, `max_tokens` 16 —
+the OpenAI API's minimum; the official 10 is rejected, and a one-token yes/no
+verdict is unaffected. Gold and hypothesis sit inside a data-boundary wrapper
+(disclosed deviation). Every row carries the provider-reported reader and
+judge snapshot ids and the reader prompt sha.
+
 # Re-judge until judge_errors and skipped_budget are both 0: a judge-only backfill
 # (no reader calls) under the same retrieval pins; FILE is rewritten in place.
 gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
