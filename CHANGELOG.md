@@ -211,8 +211,10 @@ is in `docs/eval-bench.md`.
   file hash in `run_config`), `--capture-pool` (post-rerank pool for autocut
   replay), `--record` (ledger row with secret-redacted errors), resume gated by
   `retrieval_config_hash` (`--allow-mixed-run-config`), `retrieved[]` rows for
-  replay. Committed seed-42 dev slice and decision-set splits under
-  `evals/longmemeval/`.
+  replay. A same-file resume appends rows the moment they land (a timeout or
+  kill loses at most the in-flight question) and compacts the file to one row
+  per question at run end. Committed seed-42 dev slice and decision-set splits
+  under `evals/longmemeval/`.
 - **Judged answer-accuracy lane** (`--judge`, `--judge-model`, `--max-usd`,
   `--yes`, `--judge-concurrency`, `--allow-incomplete-judgments`): the official
   `evaluate_qa.py` prompts per question type at temperature 0 with gpt-4o (max_tokens 16 — the provider minimum; the official 10 is rejected by the OpenAI API and a one-token verdict is unaffected),
