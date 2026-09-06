@@ -49,6 +49,15 @@
   receipt's `verdict`. **Why:** the wave produced two misfired receipts before
   the right one; a receipt producer should not have a silent default shape.
   **Effort:** S. **Priority:** P3.
+- [ ] **P3 — `gbrain eval longmemeval` writes the spend guard's actual-cost file.**
+  **What:** `scripts/eval-spend-guard.sh` books the launch ESTIMATE unless the
+  child writes `$GBRAIN_EVAL_ACTUAL_COST_FILE`; the harness never does, so the
+  wave's ledger over-books retrieval arms ($1–3 vs cents) and under-books
+  reader passes ($3 vs ≈ $4.5). The harness already knows the judge cost per
+  row (`judge_cost_usd`) and the embed-cache miss count; the reader's Anthropic
+  usage block is available on the response. Sum them per run and write the
+  file at exit (also on the resume-noop path). **Why:** the cap is only as
+  honest as the ledger. **Effort:** S. **Priority:** P3.
 - [ ] **P3 — LoCoMo + BEAM lanes on `src/eval/shared/`.**
   **What:** two more long-conversation memory benchmarks, each a loader
   (dataset → sessions + questions) plus a thin runner over the dataset-agnostic
