@@ -284,11 +284,20 @@ function capitalizedBigramFlanked(text: string, idx: number, len: number): boole
   return !!before && !!after && isCapitalizedWord(before) && isCapitalizedWord(after);
 }
 
+/**
+ * Iterate every match of a `g`-flagged literal pattern. `matchAll` clones the
+ * regex, so a shared module-level literal never leaks `lastIndex` state, and no
+ * RegExp is ever constructed from a runtime string (all patterns below are
+ * source literals).
+ */
+function eachMatch(text: string, re: RegExp): IterableIterator<RegExpExecArray> {
+  if (!re.global) throw new Error(`diagnostics: pattern ${re} must carry the g flag`);
+  return text.matchAll(re);
+}
+
 /** First occurrence of `re` (global) that is neither inside quotes nor a Capitalized-Bigram bridge. */
 function findConnector(text: string, re: RegExp, spans: readonly Span[]): { index: number; length: number } | null {
-  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
-  let m: RegExpExecArray | null;
-  while ((m = g.exec(text)) !== null) {
+  for (const m of eachMatch(text, re)) {
     const wordStart = m.index + (m[0].length - m[0].trimStart().length);
     if (insideQuotes(spans, wordStart)) continue;
     if (capitalizedBigramFlanked(text, m.index, m[0].length)) continue;
@@ -299,9 +308,7 @@ function findConnector(text: string, re: RegExp, spans: readonly Span[]): { inde
 
 /** First match of `re` (global) whose start is not inside a quoted span. */
 function firstMarker(text: string, re: RegExp, spans: readonly Span[]): RegExpExecArray | null {
-  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
-  let m: RegExpExecArray | null;
-  while ((m = g.exec(text)) !== null) {
+  for (const m of eachMatch(text, re)) {
     if (!insideQuotes(spans, m.index)) return m;
   }
   return null;
@@ -347,15 +354,15 @@ export function splitClauses(question: string): string[] {
 export function splitClausesDetailed(question: string): ClauseSplit {
   const text = question.replace(/\s+/g, ' ').trim().replace(/[?.!]+$/, '');
   const spans = quotedSpans(text);
-  const AND = /\s(?:and)\s/i;
-  const OR = /\s(?:or)\s/i;
+  const AND = /\s(?:and)\s/gi;
+  const OR = /\s(?:or)\s/gi;
   // A marker that matched but found no usable connector is remembered so the
   // caller sees `no_connector` (not `no_pattern`) when nothing later fires.
   let markerMiss: ClauseSplit | null = null;
 
   // 1. how many (days|weeks|months|years|hours|time) … between X and Y
   if (/^how (?:many|much)\s+(?:days?|weeks?|months?|years?|hours?|time)\b/i.test(text)) {
-    const m = firstMarker(text, /\bbetween\s+/i, spans);
+    const m = firstMarker(text, /\bbetween\s+/gi, spans);
     if (m) {
       const off = m.index + m[0].length;
       const r = splitRest(text.slice(off), AND, spans, off, 'how_many_between');
@@ -365,7 +372,7 @@ export function splitClausesDetailed(question: string): ClauseSplit {
   }
   // 2. between X and Y (temporal / comparison signal required)
   {
-    const m = firstMarker(text, /\bbetween\s+/i, spans);
+    const m = firstMarker(text, /\bbetween\s+/gi, spans);
     if (m && TEMPORAL_SIGNAL.test(text)) {
       const off = m.index + m[0].length;
       const r = splitRest(text.slice(off), AND, spans, off, 'between');
@@ -375,7 +382,7 @@ export function splitClausesDetailed(question: string): ClauseSplit {
   }
   // 3. first … or … / which came first, X or Y
   {
-    const m = firstMarker(text, /\b(?:which (?:came|happened|occurred|was|one was) first|first)\b[,:]?\s+/i, spans);
+    const m = firstMarker(text, /\b(?:which (?:came|happened|occurred|was|one was) first|first)\b[,:]?\s+/gi, spans);
     if (m) {
       const off = m.index + m[0].length;
       const r = splitRest(text.slice(off), OR, spans, off, 'first_or');
@@ -392,13 +399,13 @@ export function splitClausesDetailed(question: string): ClauseSplit {
       if (r.clauses.length === 2) return r;
     }
     // 4a. X before or after Y
-    const boa = firstMarker(text, /\bbefore or after\b/i, spans);
+    const boa = firstMarker(text, /\bbefore or after\b/gi, spans);
     if (boa) {
       const r = pair(text.slice(0, boa.index), text.slice(boa.index + boa[0].length), 'before_after');
       if (r.clauses.length === 2 || r.reason !== 'no_connector') return r;
     }
     // 4b. generic X before|after Y
-    const c = findConnector(text, /\s(?:before|after)\s/i, spans);
+    const c = findConnector(text, /\s(?:before|after)\s/gi, spans);
     if (c) return pair(text.slice(0, c.index), text.slice(c.index + c.length), 'before_after');
   }
   return markerMiss ?? { clauses: [], pattern: null, reason: 'no_pattern' };

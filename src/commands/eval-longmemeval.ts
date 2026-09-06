@@ -58,7 +58,7 @@
 
 import { homedir } from 'os';
 import { join } from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { withBenchmarkBrain, resetTables } from '../eval/longmemeval/harness.ts';
 import { haystackToPages, normalizeSessions } from '../eval/longmemeval/adapter.ts';
 import {
@@ -602,8 +602,9 @@ function floorBreaches(summary: ByTypeSummaryV2, floor: number, metric: FloorMet
   return breaches;
 }
 
-function gitShort(cmd: string, fallback: string): string {
-  try { return execSync(cmd, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || fallback; } catch { return fallback; }
+/** Run one fixed `git` subcommand (argv form, no shell) and return trimmed stdout, or `fallback`. */
+function gitShort(argv: readonly string[], fallback: string): string {
+  try { return execFileSync('git', argv, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || fallback; } catch { return fallback; }
 }
 
 export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}): Promise<void> {
@@ -847,8 +848,8 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     }
 
     if (opts.record) {
-      const commit = gitShort('git rev-parse --short HEAD', 'unknown');
-      const repoRoot = gitShort('git rev-parse --show-toplevel', process.cwd());
+      const commit = gitShort(['rev-parse', '--short', 'HEAD'], 'unknown');
+      const repoRoot = gitShort(['rev-parse', '--show-toplevel'], process.cwd());
       const record: EvalRunRecord = {
         schema_version: 3,
         run_id: `${commit}-longmemeval-${pins.mode}-${Date.now().toString(36)}`,
