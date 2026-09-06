@@ -51,9 +51,18 @@ command runs through `scripts/eval-spend-guard.sh 75 <estimate> -- …`
   `search.relational_rerank_pin=3` (the new bundle default; measured with
   `--autocut on`, the shipped shape): PASS — 0 hit@1 / 0 hit@3 losses,
   21/39 and 27/39, core unchanged. Balanced reranker stays ON.
-- **Cat 13 conceptual recall E0 (sibling repo; reranker {off,on} × autocut
-  {off,on}; like-for-like vs bare vector 49.5 is off/off):** pending
-  (receipts running).
+- **Cat 13 conceptual recall (sibling repo, Voyage space, 20 tuning / 10
+  held-out concepts, seed 42):** E0 reproduced the gap — held-out nDCG@5 bare
+  vector 60.5 vs gbrain 53.0 (off/off) and 55.8 (shipped default). E2
+  (`search.keyword_arm_confidence_floor`, calibrated 0.6121 on the tuning
+  split): held-out 53.0 → 53.0, rule FAILED, knob ships off; the calibration
+  showed 83% of the losing probes had an EMPTY keyword arm. E1 localized the
+  loss to the post-fusion metadata boosts promoting hub pages when the vector
+  arm was the only voter. E3 (`search.metadata_boost_gate=lexical`, rule
+  ≥ 57.0 written before the run): held-out 57.8 (off/off) and 57.9 (shipped
+  default), tuning 57.3 = projection; NamedThingBench 50/50, BrainBench,
+  the retrieval canary and the LongMemEval dev slice (40/40) byte-identical →
+  PASS, flipped to `lexical` in every bundle. Stretch (vector 60.5) not met.
 - **Expansion variant budget dev-slice sweep (A3 frozen variants via
   `--expansion-replay`; budgets 2.0 / 1.0 / 0.5 / 0.25 on the 40):** pending
   (receipts running). Decision rule: the largest budget within 1 question of

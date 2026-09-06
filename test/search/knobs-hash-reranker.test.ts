@@ -317,12 +317,12 @@ describe('ranker wave (Phase E2): keyword_arm_confidence_floor participates in t
 });
 
 describe('ranker wave (Phase E3): metadata_boost_gate participates in the hash (mbg=)', () => {
-  test('always (bundle) vs lexical → distinct hashes; a partial-knobs literal hashes as always', () => {
+  test('always vs lexical (bundle) → distinct hashes; a partial-knobs literal hashes as always', () => {
     const always = knobsHash({ ...baseKnobs(), metadata_boost_gate: 'always' });
     const lexical = knobsHash({ ...baseKnobs(), metadata_boost_gate: 'lexical' });
     expect(always).not.toBe(lexical);
-    expect(knobsHash(baseKnobs())).toBe(always);
+    expect(knobsHash(baseKnobs())).toBe(lexical); // bundle default since the Phase E3 flip
     const { metadata_boost_gate: _drop, ...partial } = baseKnobs();
-    expect(knobsHash(partial as ResolvedSearchKnobs)).toBe(always);
+    expect(knobsHash(partial as ResolvedSearchKnobs)).toBe(always); // absent field = pre-wave identity
   });
 });

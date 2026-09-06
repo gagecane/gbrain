@@ -181,9 +181,9 @@ describe('runPostFusionStages — skipMetadataBoosts threads through as ONE bloc
 });
 
 describe('metadata_boost_gate knob plane — bundle, config parse, resolution chain', () => {
-  test('every bundle lands at `always` (today\'s pipeline) until the Phase E3 held-out receipt', () => {
+  test('every bundle is `lexical` since the Phase E3 held-out receipt (57.8 vs 53.0; gates unchanged); `always` is the pre-wave pipeline', () => {
     for (const m of SEARCH_MODES) {
-      expect(MODE_BUNDLES[m].metadata_boost_gate).toBe('always');
+      expect(MODE_BUNDLES[m].metadata_boost_gate).toBe('lexical');
     }
   });
 
@@ -197,15 +197,15 @@ describe('metadata_boost_gate knob plane — bundle, config parse, resolution ch
   });
 
   test('resolution chain: per-call > config override > bundle; an invalid config value resolves to the bundle', () => {
-    expect(resolveSearchMode({ mode: 'balanced' }).metadata_boost_gate).toBe('always');
-    expect(resolveSearchMode({ mode: 'balanced', overrides: { metadata_boost_gate: 'lexical' } }).metadata_boost_gate).toBe('lexical');
+    expect(resolveSearchMode({ mode: 'balanced' }).metadata_boost_gate).toBe('lexical');
+    expect(resolveSearchMode({ mode: 'balanced', overrides: { metadata_boost_gate: 'always' } }).metadata_boost_gate).toBe('always');
     expect(resolveSearchMode({
       mode: 'balanced', overrides: { metadata_boost_gate: 'lexical' }, perCall: { metadata_boost_gate: 'always' },
     }).metadata_boost_gate).toBe('always');
     expect(resolveSearchMode({
       mode: 'tokenmax', overrides: loadOverridesFromConfig({ 'search.metadata_boost_gate': 'off' }),
-    }).metadata_boost_gate).toBe('always');
-    const input = { mode: 'conservative', overrides: { metadata_boost_gate: 'lexical' as const } };
+    }).metadata_boost_gate).toBe('lexical');
+    const input = { mode: 'conservative', overrides: { metadata_boost_gate: 'always' as const } };
     expect(attributeKnob('metadata_boost_gate', input, resolveSearchMode(input)).source).toBe('override');
     expect(attributeKnob('metadata_boost_gate', { mode: 'conservative' }, resolveSearchMode({ mode: 'conservative' })).source).toBe('mode');
   });
@@ -228,14 +228,14 @@ describe('knobsHash — mbg= participates under the v=29 epoch', () => {
     const always = knobsHash({ ...base, metadata_boost_gate: 'always' });
     const lexical = knobsHash({ ...base, metadata_boost_gate: 'lexical' });
     expect(always).not.toBe(lexical);
-    expect(knobsHash(base)).toBe(always);
+    expect(knobsHash(base)).toBe(lexical); // bundle default since the Phase E3 flip
     const { metadata_boost_gate: _drop, ...partial } = base;
-    expect(knobsHash(partial as ResolvedSearchKnobs)).toBe(always);
+    expect(knobsHash(partial as ResolvedSearchKnobs)).toBe(always); // absent field = pre-wave identity
   });
 
   test('the per-call and config planes reach the hash identically', () => {
-    const viaConfig = knobsHash(resolveSearchMode({ mode: 'balanced', overrides: loadOverridesFromConfig({ 'search.metadata_boost_gate': 'lexical' }) }));
-    const viaPerCall = knobsHash(resolveSearchMode({ mode: 'balanced', perCall: { metadata_boost_gate: 'lexical' } }));
+    const viaConfig = knobsHash(resolveSearchMode({ mode: 'balanced', overrides: loadOverridesFromConfig({ 'search.metadata_boost_gate': 'always' }) }));
+    const viaPerCall = knobsHash(resolveSearchMode({ mode: 'balanced', perCall: { metadata_boost_gate: 'always' } }));
     expect(viaConfig).toBe(viaPerCall);
     expect(viaConfig).not.toBe(knobsHash(resolveSearchMode({ mode: 'balanced' })));
   });

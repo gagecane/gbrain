@@ -26,6 +26,8 @@ The bundles are frozen in `src/core/search/mode.ts` (`MODE_BUNDLES`):
 | `expansion_variant_budget`    | `null` (legacy) | `null` (legacy) | `null` (legacy) |
 | `relationalRetrieval`         | false          | **true**   | **true**       |
 | `relational_rerank_pin`       | 3              | 3          | 3              |
+| `keyword_arm_confidence_floor` | `null` (off)  | `null` (off) | `null` (off)  |
+| `metadata_boost_gate`         | `lexical`      | `lexical`  | `lexical`      |
 | `searchLimit` default         | 10             | 25         | 50             |
 | `reranker` (cross-encoder)    | off            | `voyage:rerank-2.5` | `voyage:rerank-2.5` |
 | `autocut` (rerank-cliff cut)  | off            | on (0.35)  | on (0.35)      |
@@ -72,6 +74,29 @@ Five of the knobs deserve a sentence:
   results"* (no skill backs this; your agent runs
   `gbrain config set search.relational_rerank_pin off`, and
   `gbrain config set search.relational_rerank_pin 3` restores the default).
+- **`metadata_boost_gate`** (config key `search.metadata_boost_gate`;
+  `lexical` in every bundle) decides whether the post-fusion metadata boosts
+  (backlinks, salience, recency, graph adjacency, alias resolution) run when
+  the vector arm was the only voter. Those boosts reward well-connected hub
+  pages; on paraphrase-style concept questions where no keyword, title or
+  relational row fused, they promoted hubs over the page that actually
+  matched. `lexical` skips them in that case and keeps the vector order;
+  `always` restores the pre-wave pipeline. Supersession, exact-match and
+  reranking are untouched either way. Receipt: conceptual-recall nDCG@5 rose
+  from 53.0 to 57.8 on held-out concepts with the entity, brain and
+  LongMemEval benchmarks byte-identical.
+  **Say to your agent:** *"Always apply backlink and recency boosts, even on
+  vector-only matches"* (no skill backs this; your agent runs
+  `gbrain config set search.metadata_boost_gate always`, and
+  `gbrain config set search.metadata_boost_gate lexical` restores the default).
+- **`keyword_arm_confidence_floor`** (config key
+  `search.keyword_arm_confidence_floor`; off in every bundle) down-weights the
+  keyword and title arms in the fusion when the keyword arm's top-vs-second
+  margin ratio is below the floor (only when a vector arm also voted and the
+  query is not relational). It ships off: its pre-registered conceptual-recall test did
+  not move the held-out score, and most of that gap came from pages the
+  keyword arm never matched at all. Operators with a noisy keyword arm can set
+  a floor in `(0, 1]`; `off` restores the default.
 - **`keywordOrFallback`** (on in every mode; config key
   `search.keywordOrFallback`) relaxes the keyword and title arms from AND
   to OR when strict AND matching finds nothing, so a multi-word query still

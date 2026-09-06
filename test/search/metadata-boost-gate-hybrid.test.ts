@@ -117,8 +117,8 @@ describe('metadata_boost_gate — hermetic hybridSearch (Cat 13 E3)', () => {
     expect(slugs(await engine.searchKeyword(LEXICAL, { limit: 10 }))).toContain(GOLD);
   });
 
-  test('always (bundle default): the hub decoy outranks the gold concept page via the backlink boost; meta reports a vector-only voter', async () => {
-    const { results, meta } = await run(PARAPHRASE);
+  test('always (pre-wave pipeline, per-call): the hub decoy outranks the gold concept page via the backlink boost; meta reports a vector-only voter', async () => {
+    const { results, meta } = await run(PARAPHRASE, { metadataBoostGate: 'always' });
     expect(slugs(results).slice(0, 2)).toEqual([HUB, GOLD]);
     const hub = results.find((r) => r.slug === HUB)!;
     expect(hub.backlink_boost).toBeGreaterThan(1.1);
@@ -142,21 +142,29 @@ describe('metadata_boost_gate — hermetic hybridSearch (Cat 13 E3)', () => {
     });
   });
 
-  test('lexical (config key `search.metadata_boost_gate`): same outcome through the config plane', async () => {
-    await engine.setConfig('search.metadata_boost_gate', 'lexical');
+  test('bundle default is lexical: no pins → gold is top-1 and meta reports the vector-only voter', async () => {
+    const { results, meta } = await run(PARAPHRASE);
+    expect(slugs(results).slice(0, 2)).toEqual([GOLD, HUB]);
+    expect(meta.metadata_boost_gate).toEqual({
+      gate: 'lexical', lexical_voted: false, boosts_applied: false, reason: 'vector_only_voter',
+    });
+  });
+
+  test('always (config key `search.metadata_boost_gate`): the pre-wave pipeline through the config plane; per-call wins over config', async () => {
+    await engine.setConfig('search.metadata_boost_gate', 'always');
     try {
       const { results, meta } = await run(PARAPHRASE);
-      expect(slugs(results)[0]).toBe(GOLD);
-      expect(meta.metadata_boost_gate?.gate).toBe('lexical');
-      expect(meta.metadata_boost_gate?.boosts_applied).toBe(false);
+      expect(slugs(results)[0]).toBe(HUB);
+      expect(meta.metadata_boost_gate?.gate).toBe('always');
+      expect(meta.metadata_boost_gate?.boosts_applied).toBe(true);
       // Per-call wins over config.
-      const { results: forced, meta: forcedMeta } = await run(PARAPHRASE, { metadataBoostGate: 'always' });
-      expect(slugs(forced)[0]).toBe(HUB);
-      expect(forcedMeta.metadata_boost_gate?.gate).toBe('always');
+      const { results: forced, meta: forcedMeta } = await run(PARAPHRASE, { metadataBoostGate: 'lexical' });
+      expect(slugs(forced)[0]).toBe(GOLD);
+      expect(forcedMeta.metadata_boost_gate?.gate).toBe('lexical');
     } finally {
-      await engine.setConfig('search.metadata_boost_gate', 'always');
+      await engine.setConfig('search.metadata_boost_gate', 'lexical');
     }
-    expect((await run(PARAPHRASE)).meta.metadata_boost_gate?.gate).toBe('always');
+    expect((await run(PARAPHRASE)).meta.metadata_boost_gate?.gate).toBe('lexical');
   });
 
   test('a query WITH a strict keyword hit is byte-identical under both gate values (boosts apply either way)', async () => {
@@ -174,9 +182,9 @@ describe('metadata_boost_gate — hermetic hybridSearch (Cat 13 E3)', () => {
     expect(lexical.results.find((r) => r.slug === HUB)?.backlink_boost).toBeGreaterThan(1.1);
   });
 
-  test('an unparseable per-call value is unset (falls through to the bundle = always)', async () => {
+  test('an unparseable per-call value is unset (falls through to the bundle = lexical)', async () => {
     const { results, meta } = await run(PARAPHRASE, { metadataBoostGate: 'off' as unknown as 'always' });
-    expect(slugs(results)[0]).toBe(HUB);
-    expect(meta.metadata_boost_gate?.gate).toBe('always');
+    expect(slugs(results)[0]).toBe(GOLD);
+    expect(meta.metadata_boost_gate?.gate).toBe('lexical');
   });
 });

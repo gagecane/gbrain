@@ -156,7 +156,9 @@ hybrid recall + fusion:
    ├── source-aware re-rank (CASE in SQL)
    ├── role-tagged arms; variant/clause lists weighted by search.expansion_variant_budget INSIDE the fusion (fusion-lists.ts)
    └── RRF fusion → cosine re-score → post-fusion boosts
-       (backlink / salience / recency / graph signals / exact-match)
+       (backlink / salience / recency / graph signals / exact-match;
+        the metadata boosts are skipped when the vector arm was the only
+        voter — search.metadata_boost_gate=lexical, metadata-boost-gate.ts)
        │
        ▼
 graph augment (optional two-pass structural expansion — walkDepth > 0)
@@ -258,6 +260,30 @@ guarantee for pin 0 / fail-open runs. The pin trusts the arm: a false-positive
 arm now puts up to `max` edge pages at the top instead of one at `limit` —
 turn it off per brain with `gbrain config set search.relational_rerank_pin off`.
 The knob folds into the query-cache key (`rrp=`).
+
+### Metadata boost gate: vector-only voters keep the vector order
+
+The post-fusion metadata boosts (backlink, salience, recency + chronicle,
+graph signals, alias resolution) reward well-connected pages. That is right
+when a lexical arm agreed the page is about the query; it is wrong on
+paraphrase-style concept questions where nothing but the vector arm voted —
+there the boosts promoted hub pages (1.03–1.12x) over the gold concept page,
+which carried none. `decideMetadataBoosts`
+(`src/core/search/metadata-boost-gate.ts`) runs before `runPostFusionStages`
+and, under `search.metadata_boost_gate=lexical` (every bundle), skips those
+boosts when no strict keyword, title-phrase or relational row fused (relaxed
+OR-fallback rows do not count). Supersede downrank, exact-match boost,
+title-phrase boost, compiled-truth boost, cosine re-score, dedup, reranker
+and autocut are untouched either way. Receipt (Cat 13 conceptual recall,
+gbrain-evals): held-out nDCG@5 53.0 → 57.8 (bare vector 60.5 remains the
+stretch), NamedThingBench, BrainBench, the retrieval canary and the
+LongMemEval dev slice byte-identical. `always` restores the pre-wave
+pipeline; the decision is on `HybridSearchMeta.metadata_boost_gate`; the
+knob folds into the query-cache key (`mbg=`). The companion
+`search.keyword_arm_confidence_floor` (`src/core/search/arm-confidence.ts`,
+off in every bundle) down-weights a weak keyword arm in the fusion; its
+pre-registered receipt did not move the held-out score, so it ships as an
+operator knob only.
 
 ### Autocut: score-discontinuity result-sizing
 

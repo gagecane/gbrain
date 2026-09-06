@@ -19,9 +19,8 @@
  * nDCG@5 50.6 → 57.3).
  *
  * WHAT (the ONE pre-registered mechanism). `search.metadata_boost_gate`:
- *   - `always`  — today's behavior: every post-fusion stage runs (DEFAULT in
- *                 every bundle at landing; the Phase E3 held-out receipt
- *                 decides the flip).
+ *   - `always`  — the pre-wave behavior: every post-fusion stage runs (the
+ *                 bundles flipped to `lexical` on the Phase E3 receipt).
  *   - `lexical` — the metadata-axis stages (backlink, salience, recency + the
  *                 chronicle type boost inside it, graph signals, alias-resolved)
  *                 run ONLY when a lexical arm voted in fusion: a strict keyword

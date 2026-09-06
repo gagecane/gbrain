@@ -408,12 +408,12 @@ export interface ModeBundle {
    * nDCG@5 60.3 vs live hybrid 50.6; 73/105 gap probes had BOTH lexical arms
    * empty while hub pages carried backlink / graph-adjacency / recency boosts
    * of 1.035–1.124x that the gold concept page never carried (0/96); the gate
-   * fixes 73/105 with 0 collateral (tuning 57.3). Every bundle lands at
-   * `always`; the pre-registered Phase E3 held-out rule (nDCG@5 ≥ 57.0, no
-   * NamedThingBench / canary / BrainBench / LME movement) decides the flip.
-   * Parse contract in ONE place: `normalizeMetadataBoostGate`. Override:
-   * per-call HybridSearchOpts.metadataBoostGate → `search.metadata_boost_gate`
-   * config → bundle. Folded into knobsHash as `mbg=`.
+   * fixes 73/105 with 0 collateral (tuning 57.3). Every bundle is `lexical`:
+   * the pre-registered Phase E3 held-out receipt passed (gbrain 57.8 nDCG@5 vs
+   * 53.0 before; NamedThingBench, BrainBench and the LongMemEval dev slice
+   * byte-identical). `always` restores the pre-wave pipeline.
+   * Parse contract in ONE place: `normalizeMetadataBoostGate`. Override: per-call
+   * HybridSearchOpts.metadataBoostGate → `search.metadata_boost_gate` config → bundle. knobsHash part `mbg=`.
    */
   metadata_boost_gate: MetadataBoostGate;
 }
@@ -479,7 +479,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
     keyword_arm_confidence_floor: null,
     // Phase E3 — metadata boost gate: `always` (today's pipeline) until the Cat 13 held-out receipt.
-    metadata_boost_gate: 'always',
+    metadata_boost_gate: 'lexical',
   }),
   balanced: Object.freeze({
     cache_enabled: true,
@@ -549,7 +549,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
     keyword_arm_confidence_floor: null,
     // Phase E3 — metadata boost gate: `always` (today's pipeline) until the Cat 13 held-out receipt.
-    metadata_boost_gate: 'always',
+    metadata_boost_gate: 'lexical',
   }),
   tokenmax: Object.freeze({
     cache_enabled: true,
@@ -611,7 +611,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
     keyword_arm_confidence_floor: null,
     // Phase E3 — metadata boost gate: `always` (today's pipeline) until the Cat 13 held-out receipt.
-    metadata_boost_gate: 'always',
+    metadata_boost_gate: 'lexical',
   }),
 });
 
