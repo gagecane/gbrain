@@ -2,6 +2,43 @@
 
 ## Ranker wave follow-ups (filed 2026-09-06, v0.48.3.0 wave; plan: ~/.claude/plans/do-a-gbrain-evals-fix-snug-starlight.md)
 
+- [ ] **P2 — session-aware autocut (the next pre-registered mechanism for `search.autocut`).**
+  **What:** `applyAutocut` cuts at the largest rerank-score cliff with
+  `minKeep` = 1 row. On LongMemEval the cliff after the TOP SESSION is the
+  normal shape, so the cut kept one session and dropped every other gold
+  session (strict `recall_all@5` 449 → 379 of 470; any-hit unchanged), which is
+  why the ranker wave turned autocut off in balanced/tokenmax. A session-aware
+  variant would never cut below k distinct sessions (or below `minKeep` =
+  the caller's limit) and would only trim rows AFTER the k-th distinct page,
+  keeping the token saving (mean returned window 3256 → 1633 estimated tokens
+  at 0.35) on single-fact lookups. **Why:** the saving is real for the
+  single-session question types (0 losses there at every floor); the loss is
+  entirely multi-part questions. **Context:** replay it first from the A4
+  capture (`scripts/replay-autocut-floor.ts --dataset …`, add a `--min-keep-sessions`
+  cell), rule written before the run: ≥ off − 2 on the 430 and no type > 1
+  loss on BOTH seeded halves; NamedThingBench + canary + BrainBench unchanged.
+  Flip back on in balanced/tokenmax only on that receipt. **Effort:** M.
+  **Priority:** P2.
+- [ ] **P3 — Cat 13 residual: hybrid 57.8 vs bare vector 60.5 nDCG@5 on held-out concepts.**
+  **What:** after the metadata boost gate (E3) the remaining 2.7-point gap is
+  on probes where the keyword arm DOES match (its votes for hub pages fuse
+  ahead of the vector arm's gold), not the empty-arm class the gate fixed.
+  Candidates, ONE pre-registered per run: title-arm weight on concept intents;
+  keyword-arm vote capped to pages the vector arm also ranks (top-50
+  intersection); intent-conditioned RRF k. **Why:** paraphrased concept recall
+  is the shape of "how do we think about X" questions in a real brain.
+  **Context:** sibling `eval/runner/cat13-conceptual.ts` with `--search-pin`
+  for any new knob; decisions on the 10 held-out concepts; receipts in the
+  2026-09-06 ranker-wave report. **Effort:** M. **Priority:** P3.
+- [ ] **P3 — cat13b source-swamp + world-v1 reranker on/off rows (rule R1's other two fixtures).**
+  **What:** R1 was decided on NamedThingBench (core + relational) plus Cat 13
+  on the world-v1 concept pages (reranker on/on 55.8 vs off/off 53.0 held-out,
+  no regression). The cat13b source-swamp runner was not re-run with
+  `voyage:rerank-2.5`. **Why:** source-swamp is the fixture where a reranker
+  could plausibly demote short entity pages (the community reports that
+  motivated R1). **Context:** sibling `eval/runner/cat13b-source-swamp.ts`
+  with `--reranker on|off` pins; publish both rows in the next report.
+  **Effort:** S. **Priority:** P3.
 - [ ] **P3 — LoCoMo + BEAM lanes on `src/eval/shared/`.**
   **What:** two more long-conversation memory benchmarks, each a loader
   (dataset → sessions + questions) plus a thin runner over the dataset-agnostic
@@ -1069,10 +1106,16 @@ deferred M-effort issues above are NOT repeated here.
   `search.autocut_min_top` (0.35).** Both are provider-scale-dependent; both are
   config-overridable today. The reranker default flip (zerank-2 →
   voyage:rerank-2.5) shipped in v0.48.2.0 WITHOUT re-tuning autocut_min_top: the
-  re-tune is rule R2 of the ranker wave's pre-registered rerank A/B (offline
-  `applyAutocut` replay over recorded `rerank_scores`; keep 0.35 iff A3−A1 ≥ −0.5pp
-  overall and no type < −1.0pp, else adopt the replay cell, else autocut OFF in
-  balanced/tokenmax with a CHANGELOG note). Context: outside-voice F16. Ship-review
+  re-tune was rule R2 of the ranker wave's pre-registered rerank A/B. **R2
+  DECIDED (v0.48.3.0, 2026-09-06):** the shipped default (reranker on, autocut
+  0.35) scored 379/470 strict `recall_all@5` vs 449/470 with autocut off (paired
+  +0/−68 on the 430-question decision set); the replay from the captured
+  post-rerank pool (live decisions reproduced 500/500) found no floor in
+  {0.10 … 0.80} within the guardrail on either seeded half (0.80: −9, all
+  knowledge-update) → autocut is OFF in balanced/tokenmax; `DEFAULT_AUTOCUT`
+  (0.35) is unchanged for operators who re-enable it, so the per-model floor
+  table below still applies to them. What remains open here is
+  `search.evidence_cosine_floor`. Context: outside-voice F16. Ship-review
   addendum (F6): the floor is not purely a label — `create_safety` consumes the
   evidence tier and gates duplicate-page creation, so a floor that never fires on
   a low-cosine-scale embedder degrades `exists`→`probable` and loosens the
