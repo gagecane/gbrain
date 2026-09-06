@@ -23,6 +23,88 @@ touch `~/.gbrain` per the eval discipline — results land in
 `<repo>/.gbrain-evals/eval-results.jsonl`). Record the gate verdict + headline
 metrics here per run.
 
+## Ranker wave (2026-09-06, branch stuttgart, v0.48.3.0)
+
+The read-path wave whose receipt producer is the in-repo harness
+(`gbrain eval longmemeval`: strict `recall_all@5` plus the new judged
+`qa_accuracy` lane) and the R1 reranker A/B. Rows fill in as the receipts
+land; "pending" means the run is queued or in flight, not skipped. Every paid
+command runs through `scripts/eval-spend-guard.sh 75 <estimate> -- …`
+(ledger `~/gbrain-lme-receipts/spend.jsonl`, wave cap $75).
+
+- **Dev-slice parity (harness-only commit, the 40-question
+  `evals/longmemeval/dev-slice-seed42.txt`):** 40/40 rows agree on
+  `recall_all_hit` with the sibling receipt (gbrain-evals `main`, the
+  2026-09-02 hybrid ndjson).
+- **A1 parity gate (full 470, hybrid, `--reranker off --autocut off`):**
+  pending. Rule: ≥ 465/470 rows agree on `recall_all_hit` with the sibling's
+  hybrid ndjson AND the count is within ±2 of 438; every disagreeing
+  `question_id` is itemized with per-arm ranks. No ranking default moves
+  before this passes.
+- **R1 — NamedThingBench balanced reranker ON vs OFF
+  (`scripts/r1-namedthing-rerank-ab.ts --relational`, `voyage:rerank-2.5`,
+  paired per query, one in-memory brain, embed cache pinned):** core 11
+  non-relational queries PASS (0 hit@1 / 0 hit@3 losses). Relational 39
+  graph-relationship queries FAIL without the relational re-pin: hit@1
+  21/39 → 3/39 (19 losses), hit@3 27/39 → 5/39 (22 losses) — a
+  shipped-default regression the reranker flip had never measured. With
+  `search.relational_rerank_pin=3` (the new bundle default; measured with
+  `--autocut on`, the shipped shape): PASS — 0 hit@1 / 0 hit@3 losses,
+  21/39 and 27/39, core unchanged. Balanced reranker stays ON.
+- **Cat 13 conceptual recall E0 (sibling repo; reranker {off,on} × autocut
+  {off,on}; like-for-like vs bare vector 49.5 is off/off):** pending
+  (receipts running).
+- **Expansion variant budget dev-slice sweep (A3 frozen variants via
+  `--expansion-replay`; budgets 2.0 / 1.0 / 0.5 / 0.25 on the 40):** pending
+  (receipts running). Decision rule: the largest budget within 1 question of
+  the best on the 40, then A3′ / A3′R on the 430.
+- **Autocut floor replay (A4 `--capture-pool` capture; floors off / 0.10 /
+  0.20 / 0.35 / 0.50 / 0.65 / 0.80; `--validate-live 0.35` must agree
+  byte-for-byte before any other cell is read):** pending (receipts running).
+- **Judged QA accuracy (`--judge`, `openai:gpt-4o` judge with the official
+  prompts at temperature 0; reader = the shipped default pipeline;
+  `--no-trajectory`):** pending (receipts running). Published only once
+  `judge_errors` and `skipped_budget` are both 0 (`qa_accuracy.complete`);
+  no SOTA claim — competitor numbers are protocol-unmatched.
+
+How to refresh each row (the plan's verification block; `$DS` is the cleaned
+S split, `$G` the spend guard):
+
+```bash
+export OPENAI_API_KEY=… GBRAIN_EMBEDDING_MODEL=openai:text-embedding-3-large GBRAIN_EMBEDDING_DIMENSIONS=1536
+DS=~/datasets/longmemeval/longmemeval_s_cleaned.json
+G="bash scripts/eval-spend-guard.sh 75"
+COMMON="--retrieval-only --top-k 5 --by-type --no-trajectory --embed-cache ~/.cache/gbrain-eval/lme.sqlite --record"
+
+# Dev-slice parity (40) and the A1 parity gate (470): diff recall_all_hit per question_id against the sibling ndjson.
+$G 1 -- bun run src/cli.ts eval longmemeval $DS $COMMON --mode balanced --reranker off --autocut off \
+  --question-ids evals/longmemeval/dev-slice-seed42.txt --output ~/gbrain-lme-receipts/dev-A1.ndjson
+$G 3 -- bun run src/cli.ts eval longmemeval $DS $COMMON --mode balanced --reranker off --autocut off --output ~/gbrain-lme-receipts/A1.ndjson
+
+# R1 (needs VOYAGE_API_KEY + the embedder key). The pin is not a script flag: it resolves from the bundle
+# default (3) exactly as production does, so the no-pin cell is reproduced only from a checkout that
+# predates src/core/search/relational-rerank-pin.ts.
+bun run scripts/r1-namedthing-rerank-ab.ts --relational --autocut on \
+  --embed-cache ~/.cache/gbrain-eval/lme.sqlite --out ~/gbrain-lme-receipts/r1-namedthing-receipt.json
+
+# Expansion budget sweep on the A3 frozen variants (A3 = --expansion --reranker off --autocut off, records expansion_variants).
+for B in 2.0 1.0 0.5 0.25; do $G 1 -- bun run src/cli.ts eval longmemeval $DS $COMMON --mode balanced --reranker off --autocut off \
+  --expansion --expansion-replay ~/gbrain-lme-receipts/A3.ndjson --expansion-variant-budget $B \
+  --question-ids evals/longmemeval/dev-slice-seed42.txt --output ~/gbrain-lme-receipts/dev-b$B.ndjson; done
+
+# Autocut replay from the A4 capture (A4 = --reranker on --autocut on --capture-pool, the shipped balanced default).
+bun run scripts/replay-autocut-floor.ts ~/gbrain-lme-receipts/A4.ndjson \
+  --floors off,0.10,0.20,0.35,0.50,0.65,0.80 --validate-live 0.35 --split-half seed42
+
+# Cat 13 E0: re-pin gbrain-evals to the PR head (cd gbrain && bun link && cd ../gbrain-evals && bun link gbrain),
+# then run its Cat 13 runner with search.reranker.enabled / search.autocut pinned per arm.
+
+# Judged QA: 25-question dry run, then the full run; re-judge with --judge --resume-from until judge_errors and skipped_budget are 0.
+$G 3 -- bun run src/cli.ts eval longmemeval $DS --top-k 5 --by-type --no-trajectory --mode balanced --reranker on \
+  --embed-cache ~/.cache/gbrain-eval/lme.sqlite --judge --judge-model openai:gpt-4o --max-usd 5 --yes --limit 25 \
+  --output ~/gbrain-lme-receipts/D-dry.ndjson
+```
+
 ## Eval write-path fix wave (2026-08-31, branch roseau)
 
 The first wave whose receipt is the WRITE path (gbrain-evals Cat 35), bracketed

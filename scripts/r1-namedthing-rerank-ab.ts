@@ -33,7 +33,7 @@
  *
  * Usage:
  *   bun run scripts/r1-namedthing-rerank-ab.ts [--json] [--out receipt.json]
- *       [--embed-cache PATH] [--relational] [--limit 10] [--stub-embed]
+ *       [--embed-cache PATH] [--relational] [--limit 10] [--stub-embed] [--autocut on|off] [--relational-pin N|off]
  *
  *   --stub-embed   hermetic dry run: the embed transport throws (the CI gate's
  *                  stub) so search takes the keyword + title + alias path; ONLY
@@ -392,7 +392,8 @@ export function renderMarkdown(p: R1Payload): string {
   out.push(
     `reranker (ON arm): ${p.reranker?.configured ?? R1_ON_RERANKER_MODEL}` +
       (p.reranker ? ` · api model: ${p.reranker.api_model ?? 'not echoed'} · calls: ${p.reranker.calls}` : '') +
-      ` · autocut: off (both arms)`,
+      ` · autocut: ${p.pins?.on?.['search.autocut'] === 'true' ? 'on' : 'off'} (both arms)` +
+      (p.pins?.on?.['search.relational_rerank_pin'] !== undefined ? ` · relational pin: ${p.pins.on['search.relational_rerank_pin']} (both arms)` : ''),
   );
   if (p.embed_cache) {
     out.push(`embed cache: ${p.embed_cache.path} hits=${p.embed_cache.hits} misses=${p.embed_cache.misses} infra_faults=${p.embed_cache.infra_faults} · identical query vectors across arms: ${p.identical_query_vectors ? 'yes' : 'NOT PROVEN'}`);
@@ -468,6 +469,8 @@ export function renderMarkdown(p: R1Payload): string {
 interface Args {
   /** --autocut on|off — overlays search.autocut on BOTH arms (default off = the pinned ARM_PINS). */
   autocut?: 'on' | 'off';
+  /** --relational-pin N|off — overlays search.relational_rerank_pin on BOTH arms (default: gbrain's bundle default). */
+  relationalPin?: string;
   json: boolean;
   out?: string;
   embedCache?: string;
@@ -478,7 +481,7 @@ interface Args {
 
 function usage(code: number): never {
   process.stderr.write(
-    'usage: bun run scripts/r1-namedthing-rerank-ab.ts [--json] [--out receipt.json] [--embed-cache PATH] [--relational] [--limit 10] [--stub-embed]\n',
+    'usage: bun run scripts/r1-namedthing-rerank-ab.ts [--json] [--out receipt.json] [--embed-cache PATH] [--relational] [--limit 10] [--stub-embed] [--autocut on|off] [--relational-pin N|off]\n',
   );
   process.exit(code);
 }
@@ -499,6 +502,7 @@ export function parseArgs(argv: string[]): Args {
     else if (x === '--relational') a.relational = true;
     else if (x === '--out') a.out = need(i++, x);
     else if (x === '--embed-cache') a.embedCache = need(i++, x);
+    else if (x === '--relational-pin') { const v = need(i++, x); if (!/^(off|[0-9]|10)$/.test(v)) { process.stderr.write(`--relational-pin takes 0-10 or off (got ${v})\n`); usage(2); } a.relationalPin = v; }
     else if (x === '--autocut') { const v = need(i++, x); if (v !== 'on' && v !== 'off') { process.stderr.write(`--autocut takes on|off (got ${v})\n`); usage(2); } a.autocut = v as 'on' | 'off'; }
     else if (x === '--limit') {
       a.limit = Number(need(i++, x));
@@ -593,7 +597,10 @@ async function main(): Promise<void> {
 
     // OFF arm.
     const overlay: Readonly<Record<string, string>> =
-      args.autocut === 'on' ? { 'search.autocut': 'true' } : args.autocut === 'off' ? { 'search.autocut': 'false' } : {};
+      {
+        ...(args.autocut === 'on' ? { 'search.autocut': 'true' } : args.autocut === 'off' ? { 'search.autocut': 'false' } : {}),
+        ...(args.relationalPin !== undefined ? { 'search.relational_rerank_pin': args.relationalPin } : {}),
+      };
     await applyArmPins(engine, 'off', overlay);
     const off = await runArm(engine, 'off', questions, { limit: args.limit });
     if (!args.stubEmbed) embeddedChars += queryChars;

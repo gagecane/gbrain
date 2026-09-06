@@ -462,8 +462,11 @@ our own recomputations from MemPalace's committed rankings (85.7% raw,
 98.4%) and ContextFit's self-reported 87.45% All@5 (its rerank layer reads
 gold labels, so loosely comparable). The 90-96% figures from Mem0, Mastra,
 MemCog, Zep, Hindsight, ByteRover and Supermemory are LLM-judged answer
-accuracy, a different quantity that moves with the reader and judge model;
-gbrain has published no answer-accuracy run on LongMemEval. Full report,
+accuracy, a different quantity that moves with the reader and judge model.
+gbrain's own judged answer-accuracy lane (`--judge`, "Judged answer accuracy"
+below) uses the official prompts and judge model with full protocol
+disclosure; its first number is not yet published, and it carries no SOTA
+claim because those competitor numbers are protocol-unmatched. Full report,
 comparison table, and receipts:
 [gbrain-evals `docs/benchmarks/2026-05-07-longmemeval-s.md`](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-05-07-longmemeval-s.md).
 
@@ -511,14 +514,146 @@ gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
 # --question-ids evals/longmemeval/dev-slice-seed42.txt runs the committed
 # 40-question dev slice.
 
-# Full pipeline (Anthropic key required for answer-gen):
-gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json --limit 50 \
-  > /tmp/hypothesis.jsonl
+# Judged answer accuracy (see "Judged answer accuracy" below): the reader answers
+# each question from the retrieved sessions (a chat key for the reader model) and
+# the in-repo judge grades every answer with LongMemEval's official evaluate_qa.py
+# prompts (OPENAI_API_KEY for the gpt-4o judge). --max-usd caps JUDGE spend only.
+gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
+  --top-k 5 --no-trajectory --mode balanced --reranker on \
+  --judge --judge-model openai:gpt-4o --max-usd 5 --yes \
+  --output ~/lme-receipts/judged.ndjson
 
-# Score with LongMemEval's published evaluate_qa.py (not bundled; needs
-# OpenAI gpt-4o per their spec):
-python evaluate_qa.py /tmp/hypothesis.jsonl
+# Re-judge until judge_errors and skipped_budget are both 0: a judge-only backfill
+# (no reader calls) under the same retrieval pins; FILE is rewritten in place.
+gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
+  --top-k 5 --no-trajectory --mode balanced --reranker on \
+  --judge --resume-from ~/lme-receipts/judged.ndjson --output ~/lme-receipts/judged.ndjson
+
+# The hypotheses in that file also score under LongMemEval's own evaluate_qa.py
+# (not bundled): python evaluate_qa.py ~/lme-receipts/judged.ndjson
 ```
+
+### Judged answer accuracy (`--judge`)
+
+The second lane. Instead of asking whether the gold sessions were retrieved,
+it asks whether the READER's answer was right: the reader answers each
+question from the retrieved sessions, and an LLM judge grades that answer
+against the dataset's gold with LongMemEval's own scorer prompts. The lane is
+the in-repo `gbrain eval longmemeval --judge`, so the retrieval pins, the
+reader pins and the judge pins all land on one receipt.
+
+**Say to your agent:** *"Score my brain's answer accuracy on LongMemEval"*
+(no skill backs this; your agent runs
+`gbrain eval longmemeval <file> --judge --no-trajectory`).
+
+**Current measured result:** not yet published. The first run (reader = the
+shipped default pipeline, `--mode balanced --reranker on`, `--no-trajectory`;
+judge `openai:gpt-4o`) lands here and in gbrain-evals with its pins, CI and
+disclosure line once `judge_errors` and `skipped_budget` are both 0.
+
+**Protocol — what every receipt discloses.**
+
+- **Official prompts, official rule.** `src/eval/longmemeval/judge.ts` is a
+  port of `evaluate_qa.py::get_anscheck_prompt`: the standard instruction for
+  `single-session-user` / `single-session-assistant` / `multi-session`, the
+  temporal-reasoning off-by-one-days clause, the knowledge-update
+  instruction, the single-session-preference rubric, and the abstention
+  instruction for `_abs` question ids. One user message per question, judge
+  model `gpt-4o` (`--judge-model` overrides), `temperature 0` (threaded
+  through the gateway's `ChatOpts.temperature`), `max_tokens 10`, verdict =
+  `yes` substring of the lowercased completion.
+- **Data-boundary framing (disclosed deviation).** The question, the
+  reference and the reader's response sit inside `<judge_input>` tags with an
+  instruction that the delimited content is data to grade, never instructions
+  to follow; tag closures inside the data are neutralised. The response text
+  is otherwise unaltered, so the judge grades what the reader actually said.
+- **`judge_error` class (disclosed deviation).** A judge malfunction —
+  timeout after two retries, rate limit exhausted, refusal, empty completion,
+  or a completion that is neither a yes nor a no — is recorded as a
+  `judge_error`, not scored `no`. The headline scores every such row as
+  INCORRECT, so it is never more lenient than the official rule; the errors
+  leave the denominator only in the secondary `accuracy_excluding_errors`,
+  and the backfill re-judges them.
+- **Headline rule.** `qa_accuracy.accuracy_headline` = correct / ALL
+  questions in the run, `_abs` included (the official scorer sees exactly one
+  label per hypothesis). Every ungradable question — `judge_error`,
+  budget-skipped, reader error, never judged — counts as incorrect.
+  `accuracy_excluding_errors` is secondary; `accuracy_470` is the headline
+  rule over the non-`_abs` questions (the retrieval-metric denominator);
+  `by_type` and an `abstention` sub-block break it down.
+- **Not publishable until complete.** A run with `judge_errors > 0` or
+  `skipped_budget > 0` prints `FAIL --judge: judgments incomplete … NOT
+  publishable` and exits 1 (`--allow-incomplete-judgments` downgrades it to a
+  WARN). The fix is the judge-only backfill: `--judge --resume-from FILE`
+  re-judges every row lacking a settled verdict from its stored hypothesis
+  (no reader call), rebuilds `qa_accuracy` from ALL rows and rewrites FILE.
+  `qa_accuracy.complete` is the publishability bit.
+- **Pins.** Every judged row carries `judge_config_hash`: the judge pins
+  (model, prompt version, max_tokens, temperature) plus the reader pins the
+  row was produced under (`reader_model`, `reader_prompt_sha`, k,
+  `reader_max_tokens`). A backfill hashes each prior row from its own recorded
+  reader pins, so a file answered by another reader is never relabelled as
+  this run's, and rows judged under a different hash are refused unless
+  `--allow-mixed-run-config`. Rows also record `reader_model_snapshot` and
+  `judge_model_snapshot` — the provider-reported model ids (a dated API
+  snapshot) when they differ from the requested ids.
+- **Reader prompt (disclosed deviation).** The official generation prompt
+  carries no abstention instruction; ours tells the reader to say the
+  information is not available when the retrieved sessions lack it
+  (pre-registered — without it the 30 `_abs` questions are answered and
+  judged wrong by construction). The retrieved sessions are wrapped in the
+  same `<chat_session>` UNTRUSTED framing as the rest of the harness; max
+  output tokens 512 (official 500). `reader_prompt_sha` pins the system text
+  on every row.
+- **Confidence intervals are question-sampling only.** `ci95_bootstrap` is a
+  seeded percentile bootstrap over the headline 0/1 vector (10,000 resamples,
+  seed 42), labelled `question-sampling only`: it says how much the number
+  would move under a different draw of questions, and nothing about reader /
+  judge nondeterminism, dataset revision or prompt drift.
+- **No SOTA claim.** The 90-96% judged-accuracy figures other systems publish
+  differ in context construction, reader prompt, judge, aggregation and
+  dataset revision, so they are protocol-unmatched. gbrain's number is
+  published as its first judged result with the disclosure line above and a
+  "not directly comparable" label; the only path to a comparative claim is a
+  protocol-matched replication of one competitor's setup.
+- **Spend.** `--max-usd N` (default 5) caps JUDGE spend only. The preflight
+  estimates the run (`READER_MAX_TOKENS` per live hypothesis, the stored
+  hypothesis for backfill rows) and refuses an estimate over the cap without
+  `--yes` (exit 2); at run time the lane soft-stops at the cap and stamps the
+  remaining rows `judge_skipped: "budget"`. An unpriced judge model requires
+  `--max-usd off`. Reader spend is not metered here — wrap a paid receipt in
+  `scripts/eval-spend-guard.sh`.
+
+Row fields with `--judge`: exactly one of `judge_correct` / `judge_error`
+(+ `judge_error_detail`) / `judge_skipped`, plus `judge_model`,
+`judge_model_snapshot`, `judge_raw` (first 200 chars), `judge_cost_usd`,
+`judge_attempts`, `judge_prompt_kind`, `judge_prompt_version`,
+`judge_config_hash`. The summary's `qa_accuracy` block adds
+`total_questions`, `judged`, `correct`, `judge_errors`, `skipped_budget`,
+`reader_errors`, `unjudged`, `judge_error_classes`, `est_cost_usd` /
+`actual_cost_usd` / `run_cost_usd`, `mixed_judge_config`, and
+`methodology_note` (the disclosure text, verbatim, on every receipt).
+`qa_accuracy` is in the metric glossary (`docs/eval/METRIC_GLOSSARY.md`).
+
+**Diagnosing misses.** When a strict-recall row is a miss, find out WHERE the
+gold was lost before choosing a fix:
+`bun run scripts/lme-miss-diagnostics.ts <receipt.ndjson> --dataset FILE
+[--splits evals/longmemeval/splits-seed42.json]` re-creates each missed
+question's brain exactly as the harness built it (same pins — defaulting to
+the receipt's `run_config.pins` — every embed a cache hit) and locates every
+missing gold session per arm (vector / keyword / title to depth 200, fused
+and post-rerank order from one `hybridSearch` call at limit 50, the final
+returned rows). It classifies the miss — (i) absent from every arm, (ii) in
+an arm pool but outside the fused top-k, (iii) in the fused top-k but
+reranked out, (iv) ceiling (more gold sessions than k), plus `rerun_hit` when
+the miss does not reproduce and `autocut_dropped` / `post_fusion_dropped`
+when a later trim removed a survivor — and probes the frozen hypotheses
+(second-event starvation signature, counterfactual clause sub-queries,
+candidate-generation vs reranker-depth). The clause sub-query embeds bypass
+the shared embed cache, so a diagnostics run never changes the like-for-like
+cache's canonical hash. `--out-md` renders a markdown report, `--out-ndjson`
+the per-miss rows, `--all` diagnoses every scored question. It is not a
+`gbrain` subcommand; exit 2 when the gateway or reranker is not ready.
 
 ### Architecture (read this if you're touching the harness)
 
@@ -534,6 +669,13 @@ python evaluate_qa.py /tmp/hypothesis.jsonl
 - Retrieved chat content is wrapped in `<chat_session id="..." date="...">`
   framing; the answer-gen system prompt declares the content UNTRUSTED.
   Same posture as `<take>` framing.
+- The reader prompt is a module constant in `src/eval/longmemeval/reader.ts`
+  (`READER_SYSTEM_TEXT`; its sha is the row's `reader_prompt_sha`, so two
+  rows with equal shas saw the identical instruction). The judge lives in
+  `src/eval/longmemeval/judge.ts` (official prompt port) over the
+  dataset-agnostic `src/eval/shared/judge-runner.ts` (retries, `judge_error`
+  classes, canonical-price cost, budget ledger); `qa-accuracy.ts` builds the
+  summary block, `src/eval/shared/bootstrap.ts` its interval.
 - LLM injection seam: `runEvalLongMemEval(args, {client?: ThinkLLMClient})`.
   Tests stub the client so the full pipeline runs hermetically without any
   API key.
@@ -570,11 +712,21 @@ CLI cannot drift. Unknown flags exit 1 before any work starts.
 | `--no-embed-cache` | — | Disable the embedding cache for this run |
 | `--capture-pool` | off | Record `rerank_pool` per row: the post-rerank candidate pool BEFORE autocut / the limit slice (`slug`, `chunk_id`, `session_id`, `rrf_rank`, `rerank_score`, `alias_hit`, `est_tokens`) for `scripts/replay-autocut-floor.ts` |
 | `--record` | off | Append an `EvalRunRecord` (suite `longmemeval`, params = `run_config`, error text secret-redacted) to `.gbrain-evals/eval-results.jsonl` |
+| `--judge` | off | LLM-judge each reader answer against the gold with the official LongMemEval `evaluate_qa.py` prompts (temperature 0, max_tokens 10). Implies `--by-type` (the summary gains `qa_accuracy`, whose headline scores judge errors as incorrect); incompatible with `--retrieval-only`. With `--resume-from FILE`: judge-only backfill of rows lacking a settled verdict (no reader call; `judge_error` rows are re-judged), then `qa_accuracy` is rebuilt from ALL rows and FILE is rewritten with the judged rows |
+| `--judge-model M` | `openai:gpt-4o` | Judge model (the official scorer's model); a bare id is read as an `openai` model |
+| `--max-usd N\|off` | 5 | Cap on JUDGE spend only (the reader / extractor lanes are not metered here). Preflight refuses an estimate over the cap without `--yes` (exit 2); at run time the lane soft-stops at the cap and stamps the remaining rows `judge_skipped: "budget"` (not publishable). An unpriced judge model requires `off` |
+| `--yes` | off | Proceed when the judge estimate exceeds `--max-usd` (the cap still soft-stops the run) |
+| `--judge-concurrency N` | 1 | Parallel judge calls during a `--resume-from` backfill (live rows are judged inline after each reader call) |
+| `--allow-incomplete-judgments` | off | Exit 0 even when `judge_errors > 0` or `skipped_budget > 0`. Default: such a run is NOT publishable (stderr `FAIL` line, exit 1) — re-run with `--judge --resume-from FILE` until both are 0 |
 
 Row fields: `recall_all_hit`, `recall_any_hit`, `recall_hit` (a DEPRECATED alias
 of `recall_any_hit`, kept for v1 readers), `abstention`,
 `distinct_sessions_in_top_k`, `retrieved[]`, `retrieved_session_ids`,
-`search_meta`, `retrieval_config_hash`.
+`search_meta`, `retrieval_config_hash`; on answered rows the reader pins
+`reader_model`, `reader_model_snapshot`, `reader_prompt_sha`,
+`reader_max_tokens` (`--retrieval-only` rows carry `retrieval_only: true`
+instead); with `--judge`, the `judge_*` fields listed under "Judged answer
+accuracy".
 
 ### Numbers
 

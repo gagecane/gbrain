@@ -234,9 +234,15 @@ rows are typed-EDGE answers — "who invested in acme-co" resolves to investor
 pages whose text need not mention acme-co at all — so a reranker ranks them
 below any page that merely contains the query's words. Measured on
 NamedThingBench's relational fixture (39 graph-relationship questions, the
-shipped `balanced` default, `scripts/r1-namedthing-rerank-ab.ts`): reranker
-off hit@1 21/39 · hit@3 27/39; reranker on hit@1 3/39 · hit@3 5/39, with the
-11 non-relational core questions unaffected. `pinRelationalRows`
+shipped `balanced` default, `voyage:rerank-2.5`,
+`scripts/r1-namedthing-rerank-ab.ts --relational`, paired per query): with
+the reranker on and no pin, hit@1 fell from 21/39 to 3/39 (19 paired losses)
+and hit@3 from 27/39 to 5/39 (22 paired losses), while the 11 non-relational
+core questions showed 0 losses. With the pin at its default 3 — measured with
+autocut on, the shipped shape — the same paired comparison shows 0 hit@1 and
+0 hit@3 losses (21/39 and 27/39, the reranker-off numbers) and the 11 core
+questions unchanged, which is why the balanced reranker stays on.
+`pinRelationalRows`
 (`src/core/search/relational-rerank-pin.ts`) runs immediately after the
 reranker and re-pins the arm's rows above the reranked text rows in their fused
 order, bounded by `search.relational_rerank_pin` (3 in every bundle; `0`/`off`
