@@ -63,6 +63,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       keywordOrFallback: true,
       tokenBudget: 4000,
       expansion: false,
+      // ranker wave — null = legacy weighting (byte-identical to pre-knob fusion).
+      expansion_variant_budget: null,
       searchLimit: 10,
       reranker_enabled: false,
       reranker_model: 'voyage:rerank-2.5',
@@ -98,6 +100,7 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       keywordOrFallback: true,
       tokenBudget: 12000,
       expansion: false,
+      expansion_variant_budget: null,
       searchLimit: 25,
       reranker_enabled: true,
       reranker_model: 'voyage:rerank-2.5',
@@ -132,6 +135,7 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       keywordOrFallback: true,
       tokenBudget: undefined,
       expansion: true,
+      expansion_variant_budget: null,
       searchLimit: 50,
       reranker_enabled: true,
       reranker_model: 'voyage:rerank-2.5',
@@ -456,7 +460,9 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // 27→28: compiledTruthBoost suppresses the 2x boost for synthetic
     // chunkless title rows (#4256, fixes #3695's fusion path) — reorders
     // fused rows for identical knobs; version-only invalidation.
-    expect(KNOBS_HASH_VERSION).toBe(28);
+    // 28→29: evb= expansion variant budget fold (ranker wave) — budget-weighted
+    // variant fusion reorders rows for identical knobs; null hashes as legacy.
+    expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
   test('#3515: detail set vs unset produces DIFFERENT hashes (cache contamination prevention)', () => {
@@ -486,7 +492,9 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // adaptive-on calls now cache instead of skipping.
     // 27→28: compiledTruthBoost synthetic-row suppression (#4256/#3695) —
     // version-only invalidation.
-    expect(KNOBS_HASH_VERSION).toBe(28);
+    // 28→29: evb= expansion variant budget fold (ranker wave) — budget-weighted
+    // variant fusion reorders rows for identical knobs; null hashes as legacy.
+    expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
   test('#4352 follow-up: excludePrivate true vs false produces DIFFERENT hashes (cache contamination prevention)', () => {
@@ -702,8 +710,10 @@ describe('v0.40.4 — graph_signals knob', () => {
 });
 
 describe('v0.42.3.0 — autocut knobs', () => {
-  test('KNOBS_HASH_VERSION is 28 (…; 24→25 keywordOrFallback knob kof=; 25→26 salience/recency + intent_patterns fold #4415; 26→27 adaptive-return gate + intent fold E5b/F11; 27→28 compiledTruthBoost synthetic-row suppression #4256)', () => {
-    expect(KNOBS_HASH_VERSION).toBe(28);
+  test('KNOBS_HASH_VERSION is 29 (…; 25→26 salience/recency + intent_patterns fold #4415; 26→27 adaptive-return gate + intent fold E5b/F11; 27→28 compiledTruthBoost synthetic-row suppression #4256; 28→29 evb= expansion variant budget fold)', () => {
+    // 28→29: evb= expansion variant budget fold (ranker wave) — budget-weighted
+    // variant fusion reorders rows for identical knobs; null hashes as legacy.
+    expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
   test('bundle defaults: conservative off, balanced/tokenmax on @0.20', () => {
@@ -938,5 +948,54 @@ describe('adaptive-return knobs hash fold (v=27, 2026-08 fix wave E5b)', () => {
 
   test('differing resolved intent class diverges (outside-voice F11: an entity-capped row cannot serve a concept lookup via semantic similarity)', () => {
     expect(ar({ intent: 'entity' })).not.toBe(ar({ intent: 'concept' }));
+  });
+});
+
+describe('ranker wave — expansion_variant_budget knob (null = legacy weighting)', () => {
+  test('every bundle lands at null (behavior-preserving; weighting flips only on receipt)', () => {
+    for (const m of SEARCH_MODES) {
+      expect(MODE_BUNDLES[m].expansion_variant_budget).toBeNull();
+    }
+  });
+
+  test('loadOverridesFromConfig parses a number in (0, 4] and the legacy literal', () => {
+    expect(loadOverridesFromConfig({ 'search.expansion_variant_budget': '0.5' }).expansion_variant_budget).toBe(0.5);
+    expect(loadOverridesFromConfig({ 'search.expansion_variant_budget': '4' }).expansion_variant_budget).toBe(4);
+    expect(loadOverridesFromConfig({ 'search.expansion_variant_budget': 'legacy' }).expansion_variant_budget).toBeNull();
+    expect(loadOverridesFromConfig({ 'search.expansion_variant_budget': 'null' }).expansion_variant_budget).toBeNull();
+    expect(loadOverridesFromConfig({ 'search.expansion_variant_budget': 'LEGACY' }).expansion_variant_budget).toBeNull();
+  });
+
+  test('out-of-range / non-numeric values are ignored (fall through to the bundle)', () => {
+    expect(loadOverridesFromConfig({ 'search.expansion_variant_budget': '0' }).expansion_variant_budget).toBeUndefined();
+    expect(loadOverridesFromConfig({ 'search.expansion_variant_budget': '5' }).expansion_variant_budget).toBeUndefined();
+    expect(loadOverridesFromConfig({ 'search.expansion_variant_budget': '-1' }).expansion_variant_budget).toBeUndefined();
+    expect(loadOverridesFromConfig({ 'search.expansion_variant_budget': 'x' }).expansion_variant_budget).toBeUndefined();
+    expect(loadOverridesFromConfig({})).not.toHaveProperty('expansion_variant_budget');
+    // Unset key → bundle value (null) resolves through the pick chain.
+    expect(resolveSearchMode({ mode: 'tokenmax', overrides: loadOverridesFromConfig({ 'search.expansion_variant_budget': '5' }) }).expansion_variant_budget).toBeNull();
+  });
+
+  test('resolution chain: per-call > config override > bundle (null override is honored, not skipped)', () => {
+    expect(resolveSearchMode({ mode: 'tokenmax', overrides: { expansion_variant_budget: 0.5 } }).expansion_variant_budget).toBe(0.5);
+    expect(resolveSearchMode({ mode: 'tokenmax', overrides: { expansion_variant_budget: 0.5 }, perCall: { expansion_variant_budget: 2 } }).expansion_variant_budget).toBe(2);
+    // An explicit `legacy` (null) override must win over a hypothetical non-null bundle — pick() keys on !== undefined.
+    expect(resolveSearchMode({ mode: 'tokenmax', overrides: { expansion_variant_budget: null }, perCall: {} }).expansion_variant_budget).toBeNull();
+    expect(attributeKnob('expansion_variant_budget', { mode: 'tokenmax', overrides: { expansion_variant_budget: null } }, resolveSearchMode({ mode: 'tokenmax', overrides: { expansion_variant_budget: null } })).source).toBe('override');
+  });
+
+  test('SEARCH_MODE_CONFIG_KEYS carries the key (modes --reset clears it)', () => {
+    expect(SEARCH_MODE_CONFIG_KEYS).toContain('search.expansion_variant_budget');
+  });
+
+  test('knobsHash folds the budget: legacy vs 0.5 vs 1.0 all differ; legacy is stable', () => {
+    const legacy = knobsHash(resolveSearchMode({ mode: 'tokenmax' }));
+    const legacyExplicit = knobsHash(resolveSearchMode({ mode: 'tokenmax', overrides: { expansion_variant_budget: null } }));
+    const half = knobsHash(resolveSearchMode({ mode: 'tokenmax', overrides: { expansion_variant_budget: 0.5 } }));
+    const one = knobsHash(resolveSearchMode({ mode: 'tokenmax', overrides: { expansion_variant_budget: 1.0 } }));
+    expect(legacy).toBe(legacyExplicit);
+    expect(half).not.toBe(legacy);
+    expect(one).not.toBe(legacy);
+    expect(one).not.toBe(half);
   });
 });

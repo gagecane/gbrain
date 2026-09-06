@@ -13,7 +13,8 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { buildModesReport, KNOB_DESCRIPTIONS, MODES_REPORT_PER_CALL_NOTE } from '../../src/core/search/modes-report.ts';
+import { buildModesReport, formatKnobValue, KNOB_DESCRIPTIONS, MODES_REPORT_PER_CALL_NOTE } from '../../src/core/search/modes-report.ts';
+import { _exports_for_test as searchCmd } from '../../src/commands/search.ts';
 import { MODE_BUNDLES } from '../../src/core/search/mode.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
 
@@ -69,5 +70,38 @@ describe('#4604 buildModesReport — full-bundle knob coverage', () => {
     const report = await buildModesReport(stubEngine());
     expect(report.per_call_note).toBe(MODES_REPORT_PER_CALL_NOTE);
     expect(report.per_call_note).toContain('Per-call');
+  });
+});
+
+describe('formatKnobValue — a legitimate null is not "(undefined)" (adversarial finding)', () => {
+  test('null renders distinctly per knob; undefined keeps "(undefined)"; values stringify', () => {
+    expect(formatKnobValue('expansion_variant_budget', null)).toBe('legacy (null)');
+    expect(formatKnobValue('reranker_top_n_out', null)).toBe('no truncate (null)');
+    expect(formatKnobValue('tokenBudget', null)).toBe('(null)');
+    expect(formatKnobValue('tokenBudget', undefined)).toBe('(undefined)');
+    expect(formatKnobValue('expansion_variant_budget', undefined)).toBe('(undefined)');
+    expect(formatKnobValue('expansion_variant_budget', 0.5)).toBe('0.5');
+    expect(formatKnobValue('expansion', false)).toBe('false');
+  });
+
+  test('`gbrain search modes` text at bundle defaults prints expansion_variant_budget = legacy (null)', async () => {
+    const report = await buildModesReport(stubEngine());
+    expect(report.resolved.expansion_variant_budget.value).toBeNull();
+    const text = searchCmd.formatModesText(report);
+    const row = text.split('\n').find((l) => /^\s+expansion_variant_budget\s+=/.test(l));
+    expect(row).toBeDefined();
+    expect(row).toContain('= legacy (null)');
+    expect(row).not.toContain('(undefined)');
+    // reranker_top_n_out's bundle-default null gets its own label too.
+    const tn = text.split('\n').find((l) => /^\s+reranker_top_n_out\s+=/.test(l));
+    expect(tn).toContain('= no truncate (null)');
+  });
+
+  test('a numeric config override renders the number, and the literal legacy renders legacy (null) as an override', async () => {
+    const half = await buildModesReport(stubEngine({ 'search.expansion_variant_budget': '0.5' }));
+    expect(searchCmd.formatModesText(half)).toMatch(/expansion_variant_budget\s+= 0\.5\s+\[/);
+    const legacy = await buildModesReport(stubEngine({ 'search.expansion_variant_budget': 'legacy' }));
+    expect(legacy.resolved.expansion_variant_budget.source).toBe('override');
+    expect(searchCmd.formatModesText(legacy)).toMatch(/expansion_variant_budget\s+= legacy \(null\)\s+\[/);
   });
 });

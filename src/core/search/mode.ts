@@ -31,6 +31,7 @@ import { getRecipe } from '../ai/recipes/index.ts';
 // (ai/defaults.ts — a leaf module, no SDK loads). The three bundles below
 // resolve through DEFAULT_RERANKER_MODEL (voyage:rerank-2.5 since v0.48.2).
 import { DEFAULT_RERANKER_MODEL } from '../ai/defaults.ts';
+import { normalizeExpansionVariantBudget } from './fusion-lists.ts';
 
 /**
  * Look up the `reranker.default_timeout_ms` declared by the resolved
@@ -100,6 +101,27 @@ export interface ModeBundle {
    * on for tokenmax to preserve power-user retrieval ceiling.
    */
   expansion: boolean;
+  /**
+   * Total RRF weight budget shared by every LLM-expansion variant list (and
+   * any clause-decomposition list) at fusion time; the original query's list
+   * always keeps weight 1. `null` = legacy: every list fuses at weight 1,
+   * byte-identical to the pre-knob path. A number `b` in (0, 4] is split
+   * equally across the VOTING variant lists: `weight_i = b / n_voting_arms`
+   * where n_voting_arms counts the NON-EMPTY variant/clause lists (an empty
+   * list casts no vote and does not dilute the budget — same formula as the
+   * fusion-lists.ts header), so total expansion influence no longer scales
+   * with the nondeterministic variant count. Range/parse contract lives in
+   * ONE place: `normalizeExpansionVariantBudget` (fusion-lists.ts), used by
+   * the config parser AND both per-call seams in hybrid.ts.
+   * Arithmetic: two variants agreeing on a distractor at rank 0 tie
+   * the original's rank-0 vote exactly at `b = 1.0`; legacy with two variants
+   * is ≈ `b = 2.0`; `b = 0.5` subordinates them. Receipt (LongMemEval strict
+   * recall_all@5, v0.48.2.0 harness): plain hybrid 93.19% vs hybrid + LLM
+   * expansion 54.89% (paired +3 / −183) — variant lists fusing at full weight
+   * outvote the original on small-k recall. No-op when `expansion` is off.
+   * Override: per-call → `search.expansion_variant_budget` config → bundle.
+   */
+  expansion_variant_budget: number | null;
   /**
    * Default `limit` for the operation layer (`src/core/operations.ts:1087`).
    * Mode bundle becomes the default ONLY when the caller omits the field —
@@ -344,6 +366,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     keywordOrFallback: true,
     tokenBudget: 4000,
     expansion: false,
+    expansion_variant_budget: null,
     searchLimit: 10,
     // v0.35.0.0+: reranker off — conservative is cost-sensitive; reranker
     // spend doesn't fit the tier's value prop.
@@ -392,6 +415,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     keywordOrFallback: true,
     tokenBudget: 12000,
     expansion: false,
+    expansion_variant_budget: null,
     searchLimit: 25,
     // v0.36.0.0 (D6): reranker flipped ON for `balanced` mode bundle. The
     // real-corpus benchmark shows zerank-2 reshuffles 60% of top-1 results
@@ -455,6 +479,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     keywordOrFallback: true,
     tokenBudget: undefined,
     expansion: true,
+    expansion_variant_budget: null,
     searchLimit: 50,
     // tokenmax is the high-cost-tolerant tier that already pays for LLM
     // expansion + 50-result payloads. Reranker is the natural capstone:
@@ -523,6 +548,7 @@ export interface SearchKeyOverrides {
   keywordOrFallback?: boolean;
   tokenBudget?: number;
   expansion?: boolean;
+  expansion_variant_budget?: number | null;
   searchLimit?: number;
   // v0.35.0.0+ reranker overrides
   reranker_enabled?: boolean;
@@ -577,6 +603,7 @@ export interface SearchPerCallOpts {
   keywordOrFallback?: boolean;
   tokenBudget?: number;
   expansion?: boolean;
+  expansion_variant_budget?: number | null;
   searchLimit?: number;
   // v0.35.0.0+ reranker per-call overrides (same shape as SearchKeyOverrides).
   reranker_enabled?: boolean;
@@ -682,6 +709,7 @@ export function resolveSearchMode(input: ResolveSearchModeInput): ResolvedSearch
     keywordOrFallback: pick('keywordOrFallback'),
     tokenBudget: pick('tokenBudget'),
     expansion: pick('expansion'),
+    expansion_variant_budget: pick('expansion_variant_budget'),
     searchLimit: pick('searchLimit'),
     reranker_enabled: pick('reranker_enabled'),
     reranker_model: resolvedRerankerModel,
@@ -964,7 +992,12 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // part; version-only invalidation (same class as the 13→14 detail=medium
 // boost-scope bump and the 21→22 stamp/injection epoch). One-time global
 // cold-miss spike on upgrade; refills within cache.ttl_seconds (3600s).
-export const KNOBS_HASH_VERSION = 28;
+//
+// bump 28→29 (ranker wave): `evb=` — the expansion_variant_budget knob joins
+// the key (append-only, last part). A budget-weighted write (variant lists
+// subordinated in RRF) must not serve a legacy lookup or a different budget;
+// `null` hashes as `evb=legacy` so the all-null bundles re-key exactly once.
+export const KNOBS_HASH_VERSION = 29;
 
 /**
  * v0.36 (D8 / CDX-2) — second-arg context for the cache key. The
@@ -1223,6 +1256,11 @@ export function knobsHash(
     `arom=${ctx?.adaptiveReturn?.enabled ? ctx.adaptiveReturn.otherMax : 'none'}`,
     `armk=${ctx?.adaptiveReturn?.enabled ? ctx.adaptiveReturn.minKeep : 'none'}`,
     `ari=${ctx?.adaptiveReturn?.enabled ? ctx.adaptiveReturn.intent : 'none'}`,
+    // v=29 addition (ranker wave, append-only): expansion variant budget.
+    // Weighted-RRF fusion of variant lists changes the fused order for
+    // identical knobs, so a budget write must never serve a legacy lookup.
+    // `== null` (not `=== null`) keeps a partial-knobs literal hashing as legacy.
+    `evb=${knobs.expansion_variant_budget == null ? 'legacy' : knobs.expansion_variant_budget.toFixed(3)}`,
   ];
   const h = createHash('sha256');
   h.update(parts.join('|'));
@@ -1273,6 +1311,16 @@ export function loadOverridesFromConfig(
   const ex = get('search.expansion');
   if (ex !== undefined) {
     out.expansion = ex === '1' || ex.toLowerCase() === 'true';
+  }
+  // `search.expansion_variant_budget`: the literal `legacy`/`null` pins the
+  // pre-knob weighting (null); a number in (0, 4] is the shared variant
+  // budget. Out-of-range/non-numeric falls through to the bundle (mirrors
+  // autocut_jump). ONE range contract with the per-call seams in hybrid.ts:
+  // normalizeExpansionVariantBudget (fusion-lists.ts).
+  const evb = get('search.expansion_variant_budget');
+  if (evb !== undefined) {
+    const n = normalizeExpansionVariantBudget(evb);
+    if (n !== undefined) out.expansion_variant_budget = n;
   }
   const sl = get('search.searchLimit');
   if (sl !== undefined) {
@@ -1440,6 +1488,7 @@ export const SEARCH_MODE_CONFIG_KEYS: ReadonlyArray<string> = Object.freeze([
   'search.keywordOrFallback',
   'search.tokenBudget',
   'search.expansion',
+  'search.expansion_variant_budget',
   'search.searchLimit',
   // v0.35.0.0+ reranker keys
   'search.reranker.enabled',

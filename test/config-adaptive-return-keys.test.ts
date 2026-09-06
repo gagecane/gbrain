@@ -28,6 +28,15 @@ describe('E5a — adaptive-return/autocut/CRAG keys are registered (config plane
   });
 });
 
+describe('ranker wave — search.expansion_variant_budget is registered (config plane is not a no-op)', () => {
+  // mode.ts reads it in loadOverridesFromConfig; without this row
+  // `gbrain config set search.expansion_variant_budget 0.5` is rejected and
+  // the documented knob is unreachable — the exact E5a regression class.
+  test('search.expansion_variant_budget is in KNOWN_CONFIG_KEYS', () => {
+    expect(KNOWN_CONFIG_KEYS).toContain('search.expansion_variant_budget');
+  });
+});
+
 describe('GBRAIN_RETRIEVAL_REFLEX_VOLUNTEER loadConfig env fold (ship review)', () => {
   // volunteerEnabled() reads env directly (config-less-environment escape
   // hatch, tested in reflex-volunteer.test.ts); this pins the SEPARATE

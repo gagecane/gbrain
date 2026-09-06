@@ -1336,6 +1336,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.autocut_jump',
   'search.autocut_min_keep',
   'search.autocut_min_top',
+  // Ranker wave: shared RRF weight budget for expansion variant lists (mode.ts reads; `legacy` | (0, 4]).
+  'search.expansion_variant_budget',
   'search.crag_escalation',
   'search.crag_think',
   // Models tier system (v0.31.12)

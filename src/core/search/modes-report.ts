@@ -26,6 +26,7 @@ export const KNOB_DESCRIPTIONS: Record<keyof ModeBundle, string> = {
   keywordOrFallback: 'Keyword-arm AND→OR zero-recall fallback',
   tokenBudget: 'Per-call token-budget cap (undefined = no cap)',
   expansion: 'LLM multi-query expansion (Haiku call per search)',
+  expansion_variant_budget: 'Total RRF weight shared by expansion variant lists (null = legacy weight 1 each; (0, 4])',
   searchLimit: 'Default `limit` for the operation layer',
   reranker_enabled: 'Cross-encoder reranker on/off',
   reranker_model: 'Provider:model for the reranker',
@@ -58,6 +59,25 @@ export const KNOB_DESCRIPTIONS: Record<keyof ModeBundle, string> = {
   relationalRetrieval: 'Typed-edge relational recall arm (relational queries walk the graph; no-op otherwise)',
   relational_retrieval_depth: 'Max hops for relational traversal (1..3, 2 default)',
 };
+
+/**
+ * Knobs whose legitimate `null` has a meaning of its own. The text renderer
+ * used to print `String(value ?? '(undefined)')`, so `expansion_variant_budget`
+ * at its bundle default (null = legacy weighting) rendered as `(undefined)` —
+ * indistinguishable from an unset knob. Null now renders distinctly; plain
+ * `(undefined)` stays reserved for knobs that are genuinely unset.
+ */
+export const KNOB_NULL_LABELS: Partial<Record<keyof ModeBundle, string>> = {
+  expansion_variant_budget: 'legacy (null)',
+  reranker_top_n_out: 'no truncate (null)',
+};
+
+/** Render one resolved knob value for the human `gbrain search modes` table. */
+export function formatKnobValue(knob: string, value: unknown): string {
+  if (value === undefined) return '(undefined)';
+  if (value === null) return KNOB_NULL_LABELS[knob as keyof ModeBundle] ?? '(null)';
+  return String(value);
+}
 
 /**
  * #4604: honest scope note carried on every report. The dashboard resolves

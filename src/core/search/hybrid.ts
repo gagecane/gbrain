@@ -48,6 +48,14 @@ import {
   type QuerySuggestions,
 } from './query-intent.ts';
 import { isTitlePhraseMatch } from './title-match.ts';
+import {
+  pushVectorList,
+  composeFusionLists,
+  textArmsNonEmpty,
+  normalizeExpansionVariantBudget,
+  type VectorArm,
+  type FusionListEntry,
+} from './fusion-lists.ts';
 import { normalizeAlias } from './alias-normalize.ts';
 import { stampEvidence, markKeywordHits } from './evidence.ts';
 import { applyExactLookupTier } from './exact-lookup.ts';
@@ -963,6 +971,17 @@ export interface HybridSearchOpts extends SearchOpts {
    */
   mode?: string;
   expandFn?: (query: string) => Promise<string[]>;
+  /**
+   * Per-call override for `search.expansion_variant_budget` — the total RRF
+   * weight shared by all expansion variant/clause lists (fusion-lists.ts).
+   * `undefined` → config/bundle; `null` forces legacy weighting (weight 1).
+   * Valid range is (0, 4]; anything else (0, negative, > 4, NaN) is treated
+   * as unset via `normalizeExpansionVariantBudget` (fusion-lists.ts — the one
+   * range contract shared with the config-key parser). Threaded through
+   * resolveSearchMode in BOTH the inner search and the cache resolver (knobs
+   * hash reflects it); eval budget sweeps drive it here.
+   */
+  expansionVariantBudget?: number | null;
   /** Override default RRF K constant (default: 60). Lower values boost top-ranked results more. */
   rrfK?: number;
   /** Override dedup pipeline parameters. */
@@ -980,6 +999,18 @@ export interface HybridSearchOpts extends SearchOpts {
    * row; everyone else leaves it undefined and pays no cost.
    */
   onMeta?: (meta: HybridSearchMeta) => void;
+  /**
+   * Eval capture (ranker wave, plan D24) — fires immediately before
+   * `applyAutocut` with `pool` = the pre-autocut `returnPool`, byte-identical
+   * to applyAutocut's input: post-rerank AND post alias-hop / exact-lookup /
+   * adaptive-return, INCLUDING unscored injected rows (alias / exact-lookup
+   * hits carry no `rerank_score`), BEFORE the autocut / limit slice. Fires
+   * even when autocut itself is off (the replay's "off" cell reads the same
+   * capture). `preRerank` is the deduped pre-rerank RRF order, for rank
+   * attribution. Best-effort: a throwing callback never breaks the search.
+   * Never set on production paths.
+   */
+  onRerankPool?: (pool: readonly SearchResult[], preRerank: readonly SearchResult[]) => void;
   /**
    * v0.42.20.0 (Fix 3, #1775) INTERNAL — shared query-embed deadline threaded
    * from `hybridSearchCached` into the inner `hybridSearch` so the cache-lookup
@@ -1202,6 +1233,12 @@ export async function hybridSearch(
       // would be a no-op (both branches resolve to the same mode default).
       relationalRetrieval: opts?.relationalRetrieval,
       relational_retrieval_depth: opts?.relationalRetrievalDepth,
+      // ranker wave — expansion variant budget per-call thread-through (eval
+      // budget sweeps); `null` pins legacy weighting, undefined → config/bundle.
+      // Normalized through the ONE range contract (fusion-lists.ts): 0 /
+      // negative / >4 / NaN per-call values become undefined (fall through)
+      // instead of reaching fusion — and the cache key — unvalidated.
+      expansion_variant_budget: normalizeExpansionVariantBudget(opts?.expansionVariantBudget),
     },
   });
 
@@ -1650,8 +1687,14 @@ export async function hybridSearch(
   const expansionAllowed = resolvedMode.expansion && effectiveModality !== 'image';
   if (expansionAllowed && opts?.expandFn) {
     try {
-      queries = await opts.expandFn(query);
-      if (queries.length === 0) queries = [query];
+      const expanded = await opts.expandFn(query);
+      // INVARIANT: queries[0] IS the caller's query. Both fan-outs below tag
+      // index 0 as the `original` arm (weight 1, cosine re-score vector), so
+      // an expandFn that omits or reorders the original would silently hand
+      // the anchor role to a variant. Enforce it here (and dedupe repeats so
+      // a duplicated variant can't double-vote) rather than trusting every
+      // expandFn (LLM expandQuery, eval replay, harness overrides).
+      queries = [query, ...Array.from(new Set(expanded.filter((q) => q !== query)))];
       // "Applied" = produced variants beyond the original, not just called.
       expansionApplied = queries.length > 1;
     } catch (err) {
@@ -1667,7 +1710,10 @@ export async function hybridSearch(
   //   - 'text' (default): existing text-embedding path, unchanged
   //   - 'image': embedQueryMultimodal + searchVector(embedding_image), skip keyword
   //   - 'both': text + image vector searches in parallel; merged via weighted RRF
-  let vectorLists: SearchResult[][] = [];
+  //
+  // Every vector list is a ROLE-tagged arm (fusion-lists.ts): the k/weight
+  // mapping and the text-only demotion gate read the role, never a position.
+  const vectorArms: VectorArm[] = [];
   let queryEmbedding: Float32Array | null = null;
   let imageVectorList: SearchResult[] | null = null;
   let crossModalFellOpen = false;
@@ -1702,7 +1748,7 @@ export async function hybridSearch(
           `Set search.unified_multimodal_only=true to bypass this fallback when reindex completes.`,
         );
       } else {
-        vectorLists = [unifiedList];
+        pushVectorList(vectorArms, unifiedList, 'original');
         queryEmbedding = unifiedEmbedding;
         unifiedDone = true;
       }
@@ -1752,11 +1798,13 @@ export async function hybridSearch(
   }
 
   if (unifiedDone) {
-    // Unified routing already populated vectorLists + queryEmbedding;
+    // Unified routing already populated vectorArms + queryEmbedding;
     // skip the dual-column branching.
   } else if (effectiveModality === 'image' && imageVectorList !== null) {
-    // Image-only path: results come entirely from the image column.
-    vectorLists = [imageVectorList];
+    // Image-only path: results come entirely from the image column. Sole
+    // arm → composeFusionLists fuses it at vectorK (no text arm to weigh
+    // against), exactly as the single-list mapping always did.
+    pushVectorList(vectorArms, imageVectorList, 'image');
     queryEmbedding = null; // no text embedding to cosine-re-score against
   } else {
     // 'text' or 'both' (or 'image' that fell open to text). Run the text
@@ -1796,10 +1844,11 @@ export async function hybridSearch(
             r.modality = r.modality ?? 'text';
           }
         }
-        vectorLists = textLists;
+        // queries[0] is always the caller's query (expandQuery keeps it first).
+        textLists.forEach((list, i) => pushVectorList(vectorArms, list, i === 0 ? 'original' : 'variant'));
         // 'both' mode: also include the image-side list as another input to RRF.
         if (effectiveModality === 'both' && imageVectorList !== null) {
-          vectorLists = [...vectorLists, imageVectorList];
+          pushVectorList(vectorArms, imageVectorList, 'image');
         }
       } catch (err) {
         // Embedding failure is non-fatal, fall back to keyword-only —
@@ -1851,11 +1900,20 @@ export async function hybridSearch(
         }
         const vSettled = await Promise.allSettled(okEmbeds.map(emb => engine.searchVector(emb, searchOpts)));
         const okLists: SearchResult[][] = [];
+        const okRoles: Array<'original' | 'variant'> = [];
         let vFirstErr: unknown;
         let vFailed = 0;
-        for (const s of vSettled) {
-          if (s.status === 'fulfilled') okLists.push(s.value);
-          else {
+        for (let i = 0; i < vSettled.length; i++) {
+          const s = vSettled[i];
+          if (s.status === 'fulfilled') {
+            okLists.push(s.value);
+            // okEmbeds[0] is the ORIGINAL query only when its embed survived;
+            // the original role additionally requires its searchVector to
+            // have succeeded. Otherwise every survivor is a variant (they
+            // share the expansion budget — pre-registered original-missing
+            // behavior, fusion-lists.ts).
+            okRoles.push(i === 0 && originalOk ? 'original' : 'variant');
+          } else {
             if (vFailed === 0) vFirstErr = s.reason;
             vFailed += 1;
           }
@@ -1873,18 +1931,18 @@ export async function hybridSearch(
             r.modality = r.modality ?? 'text';
           }
         }
-        vectorLists = okLists;
+        okLists.forEach((list, i) => pushVectorList(vectorArms, list, okRoles[i]));
         // 'both' mode: also include the image-side list as another input to
         // RRF — only when a text arm survived, matching the pre-wave shape
         // (a total text failure falls back to keyword-only either way).
-        if (vectorLists.length > 0 && effectiveModality === 'both' && imageVectorList !== null) {
-          vectorLists = [...vectorLists, imageVectorList];
+        if (okLists.length > 0 && effectiveModality === 'both' && imageVectorList !== null) {
+          pushVectorList(vectorArms, imageVectorList, 'image');
         }
       }
     }
   }
 
-  if (vectorLists.length === 0) {
+  if (vectorArms.length === 0) {
     // Embed/vector failed silently; record that vector did not run.
     // v0.29.1 codex pass-2 #4: this is the third return path. Apply
     // post-fusion stages here too — without it, salience='on' silently
@@ -1929,7 +1987,7 @@ export async function hybridSearch(
     await stampContentFlags(engine, kwBudgeted);
     lastResultsCount = kwBudgeted.length;
     lastRank1Score = kwBudgeted[0] ? (kwBudgeted[0].base_score ?? kwBudgeted[0].score) : undefined;
-    // WP2/T3 — the embed/vector failure that emptied vectorLists already
+    // WP2/T3 — the embed/vector failure that emptied vectorArms already
     // pushed its stage above; add the keyword-arm outcome (skipped-by-
     // modality is not a keyword miss, hence the image gate).
     if (keywordResults.length === 0 && earlyModality !== 'image') {
@@ -1963,14 +2021,13 @@ export async function hybridSearch(
   const keywordK = effectiveRrfK(baseRrfK, intentWeights.keywordWeight);
   const vectorK = effectiveRrfK(baseRrfK, intentWeights.vectorWeight);
 
-  // v0.36 cross-modal (D6): in 'both' mode, vectorLists carries
-  // [textList, imageList]. Apply per-modality RRF weights so the merge
-  // reflects the configured text/image balance. In 'text' and 'image'
-  // modes only one branch is present, so per-modality K reduces to
-  // the standard vectorK (no behavior change vs pre-v0.36).
+  // v0.36 cross-modal (D6): in 'both' mode, vectorArms carries text arms
+  // plus an `image` arm. composeFusionLists applies per-modality RRF k
+  // (textRrfK / imageRrfK) only when BOTH an image arm and a text arm are
+  // present; in 'text' and 'image' modes — and in 'both' mode whose image
+  // branch fell open — every arm fuses at the standard vectorK.
   const textRrfK = effectiveRrfK(baseRrfK, resolvedMode.cross_modal_both_text_weight);
   const imageRrfK = effectiveRrfK(baseRrfK, resolvedMode.cross_modal_both_image_weight);
-  const isBothMode = effectiveModality === 'both' && vectorLists.length >= 2;
 
   // 2026-09 fix wave (#3617 follow-up): OR-relaxed lexical rows only vote in
   // RRF when EVERY vector list came back empty — the fallback's designed
@@ -1984,15 +2041,15 @@ export async function hybridSearch(
   // fused ranks 14-17 under relaxed-arm votes, and recovering exactly on
   // kof-off). Strict-match keyword/title rows are unaffected.
   //
-  // The gate judges TEXT vector lists only (red-team, 2026-09): in 'both'
-  // mode the appended image branch must not veto the lexical rescue — a
+  // The gate judges TEXT vector arms only (red-team, 2026-09): in 'both'
+  // mode the `image` arm must not veto the lexical rescue — a
   // text-intent query whose text embeds returned zero rows (mid-backfill,
   // image-heavy corpus) would otherwise lose its only text-side recall arm
   // to image votes. ANY nonempty text list counts as healthy, including a
   // surviving expansion-variant list: variant hits are real semantic
   // evidence, which still beats noise-shaped OR matches (adjudicated vs the
   // stricter original-list-only reading).
-  const vectorArmNonEmpty = textVectorArmNonEmpty(vectorLists, isBothMode);
+  const vectorArmNonEmpty = textVectorArmNonEmpty(vectorArms);
   const keywordFusionList = vectorArmNonEmpty
     ? keywordResults.filter((r) => !r.keyword_relaxed)
     : keywordResults;
@@ -2015,37 +2072,23 @@ export async function hybridSearch(
     pushDegraded(degraded, 'keyword_relaxed_carried');
   }
 
-  const allLists: Array<{ list: SearchResult[]; k: number }> = isBothMode
-    ? [
-      // Last list in vectorLists is the image branch (we appended it above).
-      // All preceding lists (1 or more text-query embeddings if expansion ran)
-      // get textRrfK. Image branch gets imageRrfK.
-      ...vectorLists.slice(0, -1).map(list => ({ list, k: textRrfK })),
-      { list: vectorLists[vectorLists.length - 1], k: imageRrfK },
-      { list: keywordFusionList, k: keywordK },
-    ]
-    : [
-      ...vectorLists.map(list => ({ list, k: vectorK })),
-      { list: keywordFusionList, k: keywordK },
-    ];
-
-  // D1 fix (fix/title-retrieval-arm) — title candidate arm as a third
-  // weighted list. Fuses at the keyword arm's intent-effective k (same
-  // lexical-evidence class, no new tunable). Mirrors the keyword list's
-  // inclusion rules: fetch was gated on earlyModality, so no extra modality
-  // check here. Empty for non-matching queries → pure no-op.
-  if (titleFusionList.length > 0) {
-    allLists.push({ list: titleFusionList, k: keywordK });
-  }
-
-  // v0.43 — relational recall arm (fourth RRF arm), built above so it also
-  // contributes on the keyword-only fallback path. Neutral weight (baseRrfK):
-  // competes evenly with keyword/vector, not dominating. Empty for
-  // non-relational queries → pure no-op. Rides every downstream stage (cosine
-  // re-score, post-fusion boosts, dedup, reranker, autocut, token budget).
-  if (relationalList.length > 0 && effectiveModality !== 'image') {
-    allLists.push({ list: relationalList, k: baseRrfK });
-  }
+  // ONE composition point (fusion-lists.ts): role-tagged vector arms → k +
+  // weight, then keyword (keywordK), title (keywordK, only if non-empty — the
+  // D1 title arm is the same lexical-evidence class, no new tunable; its
+  // fetch was gated on earlyModality), then the v0.43 relational arm (neutral
+  // baseRrfK, text/both only; built above so it also serves the keyword-only
+  // fallback path). Expansion variant/clause arms share the resolved
+  // `expansion_variant_budget` (per-call → config → bundle) as total RRF
+  // weight (`weight / (k + rank)`); null = legacy weight 1 on every list.
+  const allLists: FusionListEntry[] = composeFusionLists({
+    arms: vectorArms,
+    keywordFusionList,
+    titleFusionList,
+    relationalList,
+    includeRelational: effectiveModality !== 'image',
+    ks: { vectorK, textRrfK, imageRrfK, keywordK, baseRrfK },
+    knobs: { expansionVariantBudget: resolvedMode.expansion_variant_budget },
+  });
 
   // issue #160: stamp unverified auto-extracted stubs across ALL candidate
   // arms BEFORE fusion so the compiled-truth authority boost skips them.
@@ -2242,6 +2285,16 @@ export async function hybridSearch(
   // `search.autocut_min_keep` > bundle); minKeep stays the never-empty
   // failsafe (default 1 — raising it floors the cut for operators whose
   // reranker score curves decay without a dramatic cliff).
+  // Eval capture hook (plan D24): fires HERE, immediately before applyAutocut,
+  // with the exact `returnPool` autocut is about to cut — post alias-hop /
+  // exact-lookup / adaptive-return, including their unscored injected rows.
+  // Firing right after the reranker (the original placement) captured a pool
+  // that was NOT autocut's input, so the replay could not reproduce the live
+  // decisions byte-for-byte.
+  if (opts?.onRerankPool) {
+    try { opts.onRerankPool(returnPool, deduped); } catch { /* eval hook must never break search */ }
+  }
+
   let autocutDecision: AutocutDecision | undefined;
   if (resolvedMode.autocut && offset === 0) {
     const r = applyAutocut(
@@ -2423,6 +2476,11 @@ export async function hybridSearchCached(
       // would be a no-op (both branches resolve to the same mode default).
       relationalRetrieval: opts?.relationalRetrieval,
       relational_retrieval_depth: opts?.relationalRetrievalDepth,
+      // ranker wave — threaded here too so knobsHash's `evb=` part reflects
+      // the per-call budget (a 0.5 write must never serve a legacy read).
+      // Same normalizer as the inner search so both resolutions agree
+      // (an invalid per-call value must hash as legacy, never as `evb=NaN`).
+      expansion_variant_budget: normalizeExpansionVariantBudget(opts?.expansionVariantBudget),
     },
   });
   // v0.36 (D8 / CDX-2 + codex /ship #4): resolve column for the cache
@@ -2833,18 +2891,16 @@ export const DEGRADED_CACHE_TTL_SECONDS = 60;
 
 /**
  * 2026-09 fix wave — pure gate for the OR-relaxed lexical demotion: is the
- * TEXT vector arm healthy? In 'both' cross-modal mode the LAST list in
- * vectorLists is the appended image branch (see the allLists assembly), and
- * it must not count: image evidence can't substitute for the text-side
- * lexical rescue the relaxed rows exist to provide. Exported for direct
- * unit-testing (simulating the both-mode mixed state needs no engine).
+ * TEXT vector arm healthy? ROLE-based (fusion-lists.ts): only arms whose
+ * role is not `image` count, so in 'both' cross-modal mode the image arm
+ * can't veto the lexical rescue — image evidence can't substitute for the
+ * text-side rescue the relaxed rows exist to provide — and a fell-open
+ * image branch with several text lists can't mis-tag a text list as the
+ * image (the old positional "last list is the image" rule). Exported for
+ * direct unit-testing (simulating the both-mode mixed state needs no engine).
  */
-export function textVectorArmNonEmpty(
-  vectorLists: SearchResult[][],
-  isBothMode: boolean,
-): boolean {
-  const textLists = isBothMode ? vectorLists.slice(0, -1) : vectorLists;
-  return textLists.some((l) => l.length > 0);
+export function textVectorArmNonEmpty(arms: readonly VectorArm[]): boolean {
+  return textArmsNonEmpty(arms);
 }
 
 /**
@@ -2924,19 +2980,26 @@ export function filterResultsByCallerScope(
  * effective k value, which lets intent weighting bias keyword vs vector
  * lists without re-weighting individual scores. Wraps rrfFusion internally
  * by computing weighted contributions in a single pass.
+ *
+ * Each entry may also carry `weight` (default 1): the literature weighted-RRF
+ * form `weight / (k + rank)` — a list-level vote multiplier that holds at
+ * every rank (a k-penalty would fade at deep ranks). `weight` omitted or 1
+ * is byte-identical to the unweighted formula. fusion-lists.ts sets it on
+ * expansion variant/clause lists from `search.expansion_variant_budget`.
  */
 export function rrfFusionWeighted(
-  lists: Array<{ list: SearchResult[]; k: number }>,
+  lists: FusionListEntry[],
   applyBoost = true,
 ): SearchResult[] {
   const scores = new Map<string, { result: SearchResult; score: number; keywordHit: boolean }>();
 
-  for (const { list, k } of lists) {
+  for (const { list, k, weight } of lists) {
+    const w = weight ?? 1;
     for (let rank = 0; rank < list.length; rank++) {
       const r = list[rank];
       const key = rrfKey(r);
       const existing = scores.get(key);
-      const rrfScore = 1 / (k + rank);
+      const rrfScore = w / (k + rank);
 
       if (existing) {
         existing.score += rrfScore;

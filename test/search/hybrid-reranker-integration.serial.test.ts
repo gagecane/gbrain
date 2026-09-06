@@ -29,7 +29,7 @@ import {
   resetGateway,
   __setEmbedTransportForTests,
 } from '../../src/core/ai/gateway.ts';
-import type { PageInput, SearchOpts } from '../../src/core/types.ts';
+import type { PageInput, SearchOpts, SearchResult } from '../../src/core/types.ts';
 import type { RerankInput, RerankResult } from '../../src/core/ai/gateway.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -276,6 +276,97 @@ describe('hybridSearch — reranker enabled (reorder)', () => {
     expect(out.length).toBeGreaterThan(0);
     // First result has the highest reranker score (0.5).
     expect((out[0] as any).rerank_score).toBe(0.5);
+  });
+});
+
+describe('hybridSearch — onRerankPool fires with the PRE-AUTOCUT returnPool (ranker wave D24, adversarial finding)', () => {
+  // The hook used to fire right after applyReranker, BEFORE the alias hop /
+  // exact-lookup tier / adaptive-return trim — so the captured pool was not
+  // the `returnPool` applyAutocut cuts and the replay could not reproduce
+  // live decisions. It now fires immediately before applyAutocut.
+  const scoringReranker = {
+    enabled: true,
+    topNIn: 30,
+    topNOut: null,
+    rerankerFn: async (input: RerankInput): Promise<RerankResult[]> =>
+      input.documents.map((_, i) => ({ index: i, relevanceScore: 0.9 - i * 0.05 })),
+  };
+
+  test('pool reflects the adaptive-return trim (post-adaptive), preRerank is the full deduped pre-rerank order', async () => {
+    let pool: readonly SearchResult[] | undefined;
+    let pre: readonly SearchResult[] | undefined;
+    let poolLenAtCall = -1;
+    const out = await hybridSearch(engine, 'alpha keyword', {
+      limit: 10,
+      autocut: false,
+      reranker: scoringReranker,
+      // Trim to 2 before autocut/limit. Pre-fix the hook saw the untrimmed
+      // reranked set (4 pages), i.e. NOT autocut's input.
+      adaptiveReturn: { enabled: true, entityMax: 2, otherMax: 2, minKeep: 1 },
+      onRerankPool: (p, preRerank) => { pool = p; pre = preRerank; poolLenAtCall = p.length; },
+    });
+    expect(pool).toBeDefined();
+    expect(pre!.length).toBeGreaterThanOrEqual(3);
+    expect(poolLenAtCall).toBe(2);
+    expect(pool!.length).toBeLessThan(pre!.length);
+    // Reranker ran BEFORE the hook: every pooled row carries a rerank_score.
+    for (const r of pool!) expect(Number.isFinite((r as any).rerank_score)).toBe(true);
+    // With autocut off and limit ≥ pool, the returned rows ARE the pool.
+    expect(out.map(r => r.slug)).toEqual(pool!.map(r => r.slug));
+  });
+
+  test('pool is byte-identical to applyAutocut input: meta.autocut.total === pool.length and kept ⊆ pool', async () => {
+    let pool: readonly SearchResult[] | undefined;
+    let meta: import('../../src/core/types.ts').HybridSearchMeta | undefined;
+    const out = await hybridSearch(engine, 'alpha keyword', {
+      limit: 10,
+      autocut: { enabled: true, jumpRatio: 0.01, minKeep: 1, minTopScore: 0 } as any,
+      reranker: {
+        ...scoringReranker,
+        // A dramatic cliff after the first two documents so autocut cuts.
+        rerankerFn: async (input: RerankInput): Promise<RerankResult[]> =>
+          input.documents.map((_, i) => ({ index: i, relevanceScore: i < 2 ? 0.95 - i * 0.01 : 0.05 })),
+      },
+      onRerankPool: (p) => { pool = [...p]; },
+      onMeta: (m) => { meta = m; },
+    });
+    expect(pool).toBeDefined();
+    expect(meta?.autocut).toBeDefined();
+    expect(meta!.autocut!.total).toBe(pool!.length);
+    expect(meta!.autocut!.kept).toBeLessThan(pool!.length);
+    expect(out.length).toBe(meta!.autocut!.kept);
+    const poolSlugs = new Set(pool!.map(r => r.slug));
+    for (const r of out) expect(poolSlugs.has(r.slug)).toBe(true);
+  });
+
+  test('pool INCLUDES the unscored exact-lookup injection (post exact-lookup tier)', async () => {
+    let sawExactLookupAtCallTime = false;
+    let sawUnscoredRow = false;
+    // Slug-shaped query → structural exact-lookup tier injects/promotes the
+    // page with `exact_lookup` set and no rerank_score. Pre-fix the hook fired
+    // before the tier, so the stamp was absent at call time.
+    await hybridSearch(engine, 'notes/alpha', {
+      limit: 10,
+      autocut: false,
+      reranker: scoringReranker,
+      onRerankPool: (p) => {
+        sawExactLookupAtCallTime = p.some(r => r.exact_lookup !== undefined);
+        sawUnscoredRow = p.some(r => r.exact_lookup !== undefined && !Number.isFinite((r as any).rerank_score));
+      },
+    });
+    expect(sawExactLookupAtCallTime).toBe(true);
+    // Documented contract: injected identity rows arrive unscored and are
+    // part of the pool (autocut's preserve predicate keeps them).
+    expect(sawUnscoredRow).toBe(true);
+  });
+
+  test('a throwing hook never breaks the search', async () => {
+    const out = await hybridSearch(engine, 'alpha keyword', {
+      limit: 10,
+      reranker: scoringReranker,
+      onRerankPool: () => { throw new Error('hook boom'); },
+    });
+    expect(out.length).toBeGreaterThan(0);
   });
 });
 
