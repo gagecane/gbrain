@@ -1,5 +1,88 @@
 # TODOS
 
+## Ranker wave follow-ups (filed 2026-09-06, v0.48.3.0 wave; plan: ~/.claude/plans/do-a-gbrain-evals-fix-snug-starlight.md)
+
+- [ ] **P3 — LoCoMo + BEAM lanes on `src/eval/shared/`.**
+  **What:** two more long-conversation memory benchmarks, each a loader
+  (dataset → sessions + questions) plus a thin runner over the dataset-agnostic
+  modules the wave landed in `src/eval/shared/` (`embed-cache.ts`,
+  `judge-runner.ts`, `bootstrap.ts`, `autocut-replay.ts`). LoCoMo dataset:
+  `raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json`
+  (~2.8 MB, 10 conversations; URL verified at plan time). BEAM: per the mem0
+  2026 benchmarks post — verify the dataset URL + license before committing
+  any fixture. **Why:** LongMemEval is ONE corpus, and the wave's Phase B
+  temporal number is in-sample (diagnosis and score share the corpus);
+  LoCoMo's temporal slice is the pre-registered OUT-OF-SAMPLE confirmation
+  that decides whether any Phase B knob flips default-on. Prove the feature
+  helps gbrain users on a second corpus — not that gbrain's ranker beats
+  another ranker. **Context:** LongMemEval-specific prompts/metrics stay in
+  `src/eval/longmemeval/`; a new lane must not fork the judge, bootstrap, or
+  embed cache. Frozen-corpus rules apply: no tuning on the confirmation
+  slice; decisions on held-out questions. **Effort:** L. **Priority:** P3.
+  **Depends on:** the v0.48.3.0 wave landing.
+- [ ] **P3 — `eval run-all` wires longmemeval via `--record`.**
+  **What:** a longmemeval arm in `src/commands/eval-run-all.ts` that drives
+  `gbrain eval longmemeval <dataset> --retrieval-only --record` (embed cache
+  on) so the per-mode orchestrator's comparison report carries the LME recall
+  row next to the qrels rows, through the same `persistRunRecord` writer
+  (`.gbrain-evals/eval-results.jsonl`, schema 3, suite `longmemeval`).
+  **Why:** today the LME ledger line only lands when someone hand-runs the
+  command; run-all is what release receipts actually execute, so an LME
+  regression is invisible to it. **Context:** needs a dataset-path knob and a
+  skip-with-reason row when the dataset is absent (hermetic CI has none) —
+  never a silent pass. **Effort:** S. **Priority:** P3.
+- [ ] **P3 — `--judge-concurrency` for inline judging.**
+  **What:** the wave landed `--judge-concurrency` for the `--resume-from`
+  judge BACKFILL only; live rows are still judged inline, one at a time,
+  after each reader call. Extend it to the live path: a bounded pool that
+  judges finished rows while the next reader call is in flight. **Why:** a
+  full judged run is wall-clock-bound by ~500 sequential judge calls on top
+  of the reader calls; overlapping them is the cheap win. **Context:** must
+  keep the spend guard (`scripts/eval-spend-guard.sh`) + `--max-usd`
+  soft-stop semantics exact with N calls in flight (no over-spend past the
+  cap), keep NDJSON rows keyed by question_id so order is irrelevant to
+  rescoring, and respect provider rate limits. The flag literal already sits
+  in `eval-longmemeval.ts` parseArgs/printHelp, so no flag-registry churn.
+  **Effort:** S/M. **Priority:** P3.
+- [ ] **P3 — in-repo `--session-diverse` arm for `eval longmemeval`.**
+  **What:** port the sibling gbrain-evals runner's session-diverse arm
+  (rebalance the top-k across distinct sessions before scoring) as an in-repo
+  `--session-diverse` flag so that published number can be reproduced here,
+  like-for-like with the hybrid arm. **Why:** the wave made `gbrain eval
+  longmemeval` the like-for-like reproduction surface for the published
+  metrics; sessdiv is the one arm still runnable only from the sibling repo.
+  **Context:** post-#3617 the fusion baseline is clean, so sessdiv must be
+  re-measured against it (its earlier delta was against a
+  relaxed-row-poisoned baseline). The new flag literal goes in
+  `eval-longmemeval.ts` parseArgs + printHelp (the flag-registry generator
+  scans one import level; `src/eval/longmemeval/*` is never scanned).
+  **Effort:** M. **Priority:** P3.
+- [ ] **P3 — named embed-transport hook in the gateway (retire the eval cache's `__setEmbedTransportForTests` dependency).**
+  **What:** the eval embed cache (`src/eval/shared/embed-cache.ts`) installs
+  itself through `src/core/ai/gateway.ts` `__setEmbedTransportForTests`, a
+  test-only seam. Promote it to a named, documented `setEmbedTransport()`
+  hook (plus an opt-in `GBRAIN_EMBED_CACHE_DIR` for the cache itself) and
+  point the eval cache at that. **Why:** production-adjacent code now depends
+  on a `__forTests` seam; the contract should be explicit so a gateway
+  refactor can't silently break every eval receipt, and so the cache can be
+  enabled without reaching into test plumbing. **Context:** gateway.ts sits
+  at its module-size ratchet — pair the hook with a peel or a
+  reviewer-visible `scripts/module-size-limits.tsv` edit in the same commit.
+  **Effort:** S. **Priority:** P3.
+- [ ] **P3 — per-subcommand flag-registry rows for `eval`.**
+  **What:** split the generated `eval` row (a union of every eval
+  subcommand's flags) into per-subcommand rows (`eval longmemeval`,
+  `eval replay`, ...) in `scripts/generate-flag-registry.ts` +
+  `src/core/cli-flag-registry.generated.ts`, keeping the union as the
+  fallback for subcommands without a row. **Why:** a union accepts
+  `eval longmemeval --qrels` (a replay flag) without complaint — flag
+  validation is only as tight as the row. **Context:** the union is the
+  registry's existing shape for every multi-subcommand command;
+  `test/generate-flag-registry.test.ts` pins the `eval` row today
+  (acceptance + rejection). Per-subcommand rows need the marker regex to
+  capture `args[0]` per cli.ts bypass branch, and a rejection case per row.
+  **Effort:** M. **Priority:** P3.
+
 ## Community fix wave follow-ups (filed 2026-09-01, v0.48.1.0 wave)
 
 - [ ] **P1 — Fix-wave 2: the 27 deferred M-effort verified issues.**
@@ -273,7 +356,7 @@ deferred M-effort issues above are NOT repeated here.
   — the wave's live calibration showed rubric v2 alone lifts the class, so
   don't add spend until production distributions disagree. **Where:**
   runTriagePass processOne + triage-rescue.ts.
-- [ ] **P2 — E4: wire-or-delete the three undispatchable eval scaffolds.**
+- [x] **P2 — E4: wire-or-delete the three undispatchable eval scaffolds.** **Completed: v0.48.3.0 (2026-09-06)** — deleted `src/commands/eval-markdown-greenfield.ts` + `eval-extract-atoms.ts` (the two ok:true/`not_yet_implemented` envelopes; referenced only by their scaffold test, which now pins synthesize-concepts alone); `eval-schema-authoring.ts` kept for its real, unit-tested `aggregateVerdict`/`parseArgs` and its runner converted to the #4198 shape (ok:false, status `not_implemented`, `runEvalSchemaAuthoringCli` exits 1; pinned in `test/eval-schema-authoring.test.ts`). Deliberately NO cli.ts/eval.ts dispatch for schema-authoring yet — a subcommand appears when it evaluates something; that wiring rides with the T16 hermetic-harness follow-through below.
   **What:** src/commands/eval-markdown-greenfield.ts, eval-extract-atoms.ts,
   eval-schema-authoring.ts are registered nowhere in eval.ts/cli.ts dispatch;
   the first two return ok:true with status not_yet_implemented — the exact
@@ -995,6 +1078,7 @@ deferred M-effort issues above are NOT repeated here.
   a low-cosine-scale embedder degrades `exists`→`probable` and loosens the
   don't-create-a-duplicate contract. Calibrate BEFORE the September embedder
   default flip, and include a per-model floor table, not one global number.
+  **In progress:** R2 receipts running in the v0.48.3.0 wave (offline `applyAutocut` replay via `scripts/replay-autocut-floor.ts`); the entry closes when they land.
 - [ ] **P2 — Cat 3 undocumented-alias enrichment.** The gbrain-evals Cat 3 runner's
   undocumented class (initials, nicknames, typos) needs alias-TABLE growth
   (enrichment writes page_aliases), not resolver changes — the v0.46.15 alias_exact
@@ -1638,6 +1722,11 @@ deferred M-effort issues above are NOT repeated here.
       ships; tokenmax stays ON. Keyless brains fail open per search
       (`no_key`, one audit row per process, no stderr) with doctor/`search
       modes` naming the fix.
+      R1 DECIDED 2026-09-06 (v0.48.3.0 ranker wave): NamedThingBench core
+      0 losses; the relational fixture collapsed with the reranker ON (hit@1
+      21→3 of 39) and is fixed by search.relational_rerank_pin=3 (0 losses
+      with the pin, incl. autocut on); balanced reranker stays ON; cat13b +
+      world-v1 rows land with Phase E.
   (c) The autocut_min_top re-tune requirement (outside-voice F16, filed at
       the P2 calibration TODO above) is rule R2 of the same A/B. -->
 
@@ -8781,6 +8870,7 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
   `src/core/search/hybrid.ts` fusion assembly (`allLists`),
   `expansion.ts`. Receipt: gbrain-evals
   `lme-phase6-8bb33cac-k5.{ndjson,json}`. **Effort:** M.
+  **In progress:** receipts running in the v0.48.3.0 wave (`search.expansion_variant_budget` arm, null = legacy; decided on the held-out questions per the pre-registered rule); the entry closes when they land.
 - [ ] **P3 — IPC probe-field version echo.** **What:** a NEW reflex client
   against an OLD long-running `gbrain serve` sends `probe:'volunteer'` that
   the serve ignores, logging the wide ungated pool as delivered pointers on
