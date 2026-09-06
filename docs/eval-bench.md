@@ -518,9 +518,14 @@ gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
   --output ~/lme-receipts/hybrid.ndjson
 
 # The shipped default path (what balanced/tokenmax run: reranker on, autocut off since v0.48.4.0).
-# --reranker on preflights reranker readiness (exit 2 with the fix if it cannot
-# run) and fails the run if any row fell through un-reranked. Note the 95.32%
-# row above was reranker on with autocut OFF (`--reranker on --autocut off`).
+# The reranker gate keys on the RESOLVED pin (flag, --search-pin, snapshot or
+# bundle): a run that resolves to reranker on preflights readiness (exit 2 with
+# the fix if it cannot run) and fails the run (exit 1) if any row fell through
+# un-reranked — so a balanced run with no VOYAGE_API_KEY refuses to start (exit 2,
+# naming the fix) rather than scoring un-reranked rows, and a resume of a file that
+# already holds un-reranked rows exits 1; pass --reranker off for a reranker-free run. A run
+# where every question errored also exits 1. Note the 95.53% row above was
+# reranker on with autocut OFF (`--reranker on --autocut off`).
 gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
   --retrieval-only --top-k 5 --by-type --no-trajectory \
   --mode balanced --reranker on --autocut off \
@@ -605,11 +610,6 @@ reader pins and the judge pins all land on one receipt.
 (no skill backs this; your agent runs
 `gbrain eval longmemeval <file> --judge --no-trajectory`).
 
-**Current measured result:** not yet published. The first run (reader = the
-shipped default pipeline, `--mode balanced --reranker on`, `--no-trajectory`;
-judge `openai:gpt-4o`) lands here and in gbrain-evals with its pins, CI and
-disclosure line once `judge_errors` and `skipped_budget` are both 0.
-
 **Protocol — what every receipt discloses.**
 
 - **Official prompts, official rule.** `src/eval/longmemeval/judge.ts` is a
@@ -619,8 +619,9 @@ disclosure line once `judge_errors` and `skipped_budget` are both 0.
   instruction, the single-session-preference rubric, and the abstention
   instruction for `_abs` question ids. One user message per question, judge
   model `gpt-4o` (`--judge-model` overrides), `temperature 0` (threaded
-  through the gateway's `ChatOpts.temperature`), `max_tokens 10`, verdict =
-  `yes` substring of the lowercased completion.
+  through the gateway's `ChatOpts.temperature`), `max_tokens 16` (the
+  official 10 is below the OpenAI API minimum; a one-token verdict is
+  unaffected), verdict = `yes` substring of the lowercased completion.
 - **Data-boundary framing (disclosed deviation).** The question, the
   reference and the reader's response sit inside `<judge_input>` tags with an
   instruction that the delimited content is data to grade, never instructions
@@ -757,9 +758,9 @@ Unknown flags exit 1 before any work starts.
 | `--expansion-variant-budget B` | not pinned | Pin `search.expansion_variant_budget`: `legacy` (every RRF list weight 1) or a number in (0, 4] — the total RRF weight shared by the expansion variant lists (the original list always keeps weight 1) |
 | `--top-k K` | 8 | Retrieve K chunk rows per question; `recall_*@k` is scored over the distinct sessions among those K rows (the published rows use `--top-k 5`) |
 | `--mode M` | `balanced` (or an injected config snapshot) | Search mode `conservative` / `balanced` / `tokenmax`, resolved through `src/core/search/mode.ts` so retrieval matches production under that mode. No mode implies `--expansion` |
-| `--reranker on\|off` | not pinned (bundle decides) | Pin `search.reranker.enabled` for the run (beats any injected snapshot). `on` preflights reranker readiness (exit 2 with the fix if it cannot run) and exits non-zero if any row fell through un-reranked (`reranker_skipped_rows`) |
+| `--reranker on\|off` | not pinned (bundle decides) | Pin `search.reranker.enabled` for the run (beats any injected snapshot and any `--search-pin` on the key). The reranker gate keys on the RESOLVED pin — flag, `--search-pin`, snapshot or bundle: whenever the run resolves to reranker on, readiness is preflighted (exit 2 with the fix if it cannot run) and the run exits non-zero if any row fell through un-reranked (`reranker_skipped_rows`). A `balanced`/`tokenmax` run with no `VOYAGE_API_KEY` therefore refuses to start (exit 2 with the fix text; a resume holding un-reranked rows exits 1) — pass `--reranker off` or set the key. A run in which every question errored also exits 1 |
 | `--autocut on\|off` | not pinned (bundle decides) | Pin `search.autocut` for the run (beats any injected snapshot) |
-| `--search-pin KEY=VALUE` | none | Pin any `search.*` config key for the run (repeatable, e.g. `--search-pin search.metadata_boost_gate=always`); pins fold into `retrieval_config_hash` and the knobs hash so a resumed file cannot mix them. Unknown keys are set verbatim — check `gbrain search modes` to confirm a key exists |
+| `--search-pin KEY=VALUE` | none | Pin any `search.*` config key for the run (repeatable, e.g. `--search-pin search.metadata_boost_gate=always`). The raw pin map folds into `retrieval_config_hash` (so a resumed file cannot mix pin sets); the knobs hash covers only the mode knobs the pins resolve into. Explicit flags (`--mode`, `--reranker`, `--autocut`, `--expansion-variant-budget`) win over a `--search-pin` on the same key. Unknown keys are set verbatim — check `gbrain search modes` to confirm a key exists |
 | `--output FILE` | stdout | Write JSONL to FILE |
 | `--resume-from FILE` | off | Skip `question_id`s already present in FILE (usually the `--output` path, which then appends). Prior rows are re-scored from their `retrieved[]` + the dataset gold; a file written under different retrieval pins is refused |
 | `--allow-mixed-run-config` | off | Resume even when FILE rows carry a different `retrieval_config_hash` |
@@ -773,7 +774,7 @@ Unknown flags exit 1 before any work starts.
 | `--no-embed-cache` | — | Disable the embedding cache for this run |
 | `--capture-pool` | off | Record `rerank_pool` per row: the post-rerank candidate pool BEFORE autocut / the limit slice (`slug`, `chunk_id`, `session_id`, `rrf_rank`, `rerank_score`, `alias_hit`, `est_tokens`) for `scripts/replay-autocut-floor.ts` |
 | `--record` | off | Append an `EvalRunRecord` (suite `longmemeval`, params = `run_config`, error text secret-redacted) to `.gbrain-evals/eval-results.jsonl` |
-| `--judge` | off | LLM-judge each reader answer against the gold with the official LongMemEval `evaluate_qa.py` prompts (temperature 0, max_tokens 10). Implies `--by-type` (the summary gains `qa_accuracy`, whose headline scores judge errors as incorrect); incompatible with `--retrieval-only`. With `--resume-from FILE`: judge-only backfill of rows lacking a settled verdict (no reader call; `judge_error` rows are re-judged), then `qa_accuracy` is rebuilt from ALL rows and FILE is rewritten with the judged rows |
+| `--judge` | off | LLM-judge each reader answer against the gold with the official LongMemEval `evaluate_qa.py` prompts (temperature 0, max_tokens 16 — the official 10 is below the OpenAI API minimum; a one-token verdict is unaffected). Implies `--by-type` (the summary gains `qa_accuracy`, whose headline scores judge errors as incorrect); incompatible with `--retrieval-only`. With `--resume-from FILE`: judge-only backfill of rows lacking a settled verdict (no reader call; `judge_error` rows are re-judged), then `qa_accuracy` is rebuilt from ALL rows and FILE is rewritten with the judged rows |
 | `--judge-model M` | `openai:gpt-4o` | Judge model (the official scorer's model); a bare id is read as an `openai` model |
 | `--max-usd N\|off` | 5 | Cap on JUDGE spend only (the reader / extractor lanes are not metered here). Preflight refuses an estimate over the cap without `--yes` (exit 2); at run time the lane soft-stops at the cap and stamps the remaining rows `judge_skipped: "budget"` (not publishable). An unpriced judge model requires `off` |
 | `--yes` | off | Proceed when the judge estimate exceeds `--max-usd` (the cap still soft-stops the run) |

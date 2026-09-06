@@ -39,6 +39,15 @@ export interface RetrievalPins {
   embedder: string;
   top_k: number;
   trajectory: boolean;
+  /**
+   * Raw `--search-pin KEY=VALUE` map (sorted by key), present ONLY when at
+   * least one pin was given. A pin the mode resolver does not parse (e.g.
+   * `search.adaptive_return`) still changes ranking but never reaches
+   * `knobs_hash`; folding the raw map here keeps two differently-pinned runs
+   * from merging on resume. Omitted when empty so every pre-existing
+   * receipt's hash is unchanged.
+   */
+  search_pins?: Record<string, string>;
 }
 
 /** Stable JSON: sorted keys at every level so key order can never move the hash. */
@@ -64,7 +73,8 @@ export interface KnobsFingerprint {
  * The eight pins alone would let a resume merge two runs whose injected
  * config snapshot differs in a non-pin knob; folding the resolved knobs hash
  * closes that (the knobs hash already covers every pin, so the pins block is
- * kept for readability, not for coverage).
+ * kept for readability, not for coverage). `pins.search_pins` (raw
+ * `--search-pin` map) covers the keys the knobs hash does not parse.
  */
 export function retrievalConfigHash(pins: RetrievalPins, knobs: KnobsFingerprint): string {
   return createHash('sha256')
@@ -165,6 +175,7 @@ export function buildRunConfig(input: RunConfigInput): Record<string, unknown> {
     embedder: p.embedder,
     topK: p.top_k,
     trajectory: p.trajectory,
+    ...(p.search_pins && Object.keys(p.search_pins).length > 0 ? { search_pins: p.search_pins } : {}),
     dataset_sha256: input.dataset_sha256,
     dataset_questions: input.dataset_questions,
     question_ids_file: input.question_ids_file,

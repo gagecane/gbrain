@@ -67,7 +67,9 @@ import type { PGLiteEngine } from '../../core/pglite-engine.ts';
 import type { HybridSearchMeta, SearchOpts, SearchResult } from '../../core/types.ts';
 import { haystackToPages, type LongMemEvalQuestion } from './adapter.ts';
 import { resetTables } from './harness.ts';
-import { buildSlugToRawMap, isAbstentionQuestion, sessionIdFromSlug, type SlugToRawMap } from './metrics.ts';
+import { buildSlugToRawMap, isAbstentionQuestion, rawSessionId, type SlugToRawMap } from './metrics.ts';
+import { classifyDegradation } from './resume.ts';
+import { redactSecrets } from './run-config.ts';
 import { EmbeddingCache, installEmbedCache, type EmbedTransportFn, type InstalledEmbedCache } from '../shared/embed-cache.ts';
 
 export const DEFAULT_DEPTH = 200;
@@ -203,17 +205,11 @@ export function computeInnerLimit(limit: number): number {
   return Math.min(Math.max(limit * 2, PRE_FUSION_POOL_FLOOR, limit), MAX_SEARCH_LIMIT);
 }
 
-/** Raw session id for a slug through the per-question map (normalized tail when unmapped). */
-export function rawSessionIdForSlug(slug: string, slugToRaw?: SlugToRawMap): string {
-  const raws = slugToRaw?.get(slug);
-  return raws && raws.length > 0 ? raws[0] : sessionIdFromSlug(slug);
-}
-
 /** First chunk-row rank (1-based) per raw session id. */
 export function sessionRowRanks(rows: ReadonlyArray<{ slug: string }>, slugToRaw?: SlugToRawMap): Map<string, number> {
   const out = new Map<string, number>();
   rows.forEach((r, i) => {
-    const sid = rawSessionIdForSlug(r.slug, slugToRaw);
+    const sid = rawSessionId(r.slug, slugToRaw);
     if (!out.has(sid)) out.set(sid, i + 1);
   });
   return out;
@@ -223,7 +219,7 @@ export function sessionRowRanks(rows: ReadonlyArray<{ slug: string }>, slugToRaw
 export function sessionDistinctRanks(rows: ReadonlyArray<{ slug: string }>, slugToRaw?: SlugToRawMap): Map<string, number> {
   const out = new Map<string, number>();
   for (const r of rows) {
-    const sid = rawSessionIdForSlug(r.slug, slugToRaw);
+    const sid = rawSessionId(r.slug, slugToRaw);
     if (!out.has(sid)) out.set(sid, out.size + 1);
   }
   return out;
@@ -521,7 +517,7 @@ export function receiptTopKSessions(row: ReceiptRow, k: number, slugToRaw?: Slug
     const seen = new Set<string>();
     const out: string[] = [];
     for (const r of row.retrieved.slice(0, k)) {
-      const sid = typeof r.session_id === 'string' ? r.session_id : r.slug ? rawSessionIdForSlug(r.slug, slugToRaw) : null;
+      const sid = typeof r.session_id === 'string' ? r.session_id : r.slug ? rawSessionId(r.slug, slugToRaw) : null;
       if (sid === null || seen.has(sid)) continue;
       seen.add(sid);
       out.push(sid);
@@ -825,7 +821,7 @@ export function renderDiagnosticsMarkdown(rows: readonly MissDiagnosticsRow[], s
     if (r.clause_split.h1_supported) hyp.push('H1sup');
     if (r.golds.some(g => g.h3a)) hyp.push('H3a');
     if (r.golds.some(g => g.h3b)) hyp.push('H3b');
-    if (r.error) hyp.push(`error: ${mdEscape(r.error)}`);
+    if (r.error) hyp.push(`error: ${mdEscape(redactSecrets(r.error))}`);
     L.push(
       `| ${r.question_id} | ${r.question_type} | ${r.splits.join(', ') || '—'} | ${r.gold.join(', ')} | ${r.missing.join(', ') || '—'} | ${mdEscape(ranks)} | ${r.primary_class} | ${hyp.join(', ') || '—'} |`,
     );
@@ -982,7 +978,7 @@ export async function runDiagnostics(opts: DiagnosticsRunOpts): Promise<Diagnost
           splits: opts.splits ?? null, pins: opts.pins, embedTxn, withCacheBypassed,
         });
       } catch (err) {
-        row = errorRow(q, receiptRow, k, opts.splits ?? null, innerLimit, fusedLimit, knobs, String((err as Error)?.message ?? err));
+        row = errorRow(q, receiptRow, k, opts.splits ?? null, innerLimit, fusedLimit, knobs, err);
       }
       rows.push(row);
       opts.onRow?.(row);
@@ -1009,7 +1005,12 @@ function cacheStatsSafe(cache: EmbeddingCache): DiagnosticsSummary['cache'] {
   return { path: s.path, hits: s.hits, misses: s.misses, bypassed: s.bypassed, infra_faults: s.infra_faults };
 }
 
-function errorRow(
+/**
+ * The row stamped when `diagnoseOne` throws. The error text is secret-redacted
+ * (`redactSecrets`) BEFORE it lands on the receipt: a provider/DB failure
+ * message can carry a connection string or an API key.
+ */
+export function errorRow(
   q: LongMemEvalQuestion,
   receiptRow: ReceiptRow,
   k: number,
@@ -1017,8 +1018,9 @@ function errorRow(
   innerLimit: number,
   fusedLimit: number,
   knobs: ResolvedSearchKnobs,
-  error: string,
+  err: unknown,
 ): MissDiagnosticsRow {
+  const error = redactSecrets(String((err as Error)?.message ?? err));
   const gold = Array.from(new Set(q.answer_session_ids ?? []));
   const top = new Set(receiptTopKSessions(receiptRow, k, buildSlugToRawMap(q)));
   return {
@@ -1060,8 +1062,6 @@ interface DiagnoseOneCtx {
   embedTxn: <T>(fn: () => Promise<T>) => Promise<T>;
   withCacheBypassed: <T>(fn: () => Promise<T>) => Promise<T>;
 }
-
-const RERANKER_SKIPPED_STAGES: ReadonlySet<string> = new Set(['reranker_skipped', 'rerank_passthrough']);
 
 async function diagnoseOne(ctx: DiagnoseOneCtx): Promise<MissDiagnosticsRow> {
   const { engine, q, receiptRow, k, depth, fusedLimit, innerLimit, knobs } = ctx;
@@ -1121,13 +1121,14 @@ async function diagnoseOne(ctx: DiagnoseOneCtx): Promise<MissDiagnosticsRow> {
   });
 
   const degraded: string[] = (meta?.degraded ?? []).map(d => String(d.stage));
-  const rerankerRan = pool.some(r => Number.isFinite(r.rerank_score)) && !degraded.some(s => RERANKER_SKIPPED_STAGES.has(s));
+  // resume.ts owns the reranker-skipped stage vocabulary (one definition for the live row, the resume re-scan and this rerun).
+  const rerankerRan = pool.some(r => Number.isFinite(r.rerank_score)) && !classifyDegradation(meta, { keywordOnly: false, expansion: false }).rerankerSkipped;
 
   const vRank = sessionRowRanks(vectorRows, slugToRaw);
   const kRank = sessionRowRanks(keywordRows, slugToRaw);
   const kRelaxed = new Map<string, boolean>();
   for (const r of keywordRows) {
-    const sid = rawSessionIdForSlug(r.slug, slugToRaw);
+    const sid = rawSessionId(r.slug, slugToRaw);
     if (!kRelaxed.has(sid)) kRelaxed.set(sid, r.keyword_relaxed === true);
   }
   const tRank = sessionRowRanks(titleRows, slugToRaw);

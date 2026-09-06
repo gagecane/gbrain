@@ -23,16 +23,16 @@ import { BudgetLedger, isJudgeModelPriced } from '../shared/judge-runner.ts';
 import {
   JUDGE_MAX_TOKENS,
   JUDGE_PROMPT_VERSION,
-  JUDGE_RAW_MAX_CHARS,
   JUDGE_TEMPERATURE,
+  errorJudgeFields,
   estimateJudgeRunUsd,
   judgeConfigHash,
+  judgePromptKind,
   judgeRow,
   stripJudgeFields,
   type JudgeLaneContext,
   type JudgePromptInput,
 } from './judge.ts';
-import { redactSecrets } from './run-config.ts';
 import type { LongMemEvalQuestion } from './adapter.ts';
 
 /** `--max-usd N|off`: `off` disables the cap (and lets an unpriced judge run). */
@@ -208,8 +208,10 @@ function backfillInput(row: RowLike, q: LongMemEvalQuestion | undefined): JudgeP
  * INVARIANT: no candidate is left untouched. `judgeRow` never throws for a
  * transport failure, but a throw from anywhere else (a hasher bug, an
  * aborted signal, a malformed row) is stamped `judge_error: 'provider_error'`
- * with the redacted message, so qa_accuracy counts it and the run-end gate
- * refuses to publish instead of the row silently keeping its old state.
+ * with the redacted message — the SAME field set `judgeRow` stamps
+ * (`errorJudgeFields`), minus `judge_config_hash` when the hasher itself
+ * threw — so qa_accuracy counts it and the run-end gate refuses to publish
+ * instead of the row silently keeping its old state.
  */
 export async function runJudgeBackfill(
   candidates: ReadonlyArray<RowLike>,
@@ -224,24 +226,24 @@ export async function runJudgeBackfill(
       const fields = await judgeRow(backfillInput(row, opts.questionByQid.get(row.question_id as string)), ctx);
       stripJudgeFields(row);
       Object.assign(row, fields);
+      opts.onRow?.(row); // a throwing sink lands in the catch-all below; tally only once the row was accepted
       if (typeof fields.judge_correct === 'boolean') result.judged++;
       else if (fields.judge_error) result.errors++;
       else result.skipped++;
-      opts.onRow?.(row);
     },
   });
   for (const s of settled) {
     if (s.ok) continue;
     const row = candidates[s.idx];
     const err = s.error as { message?: unknown } | undefined;
+    const input = backfillInput(row, opts.questionByQid.get(row.question_id as string));
+    let configHash: string | null = null;
+    try { configHash = ctx.configHashFor(input); } catch { /* hasher failed: leave unstamped (re-judged on the next resume) */ }
     stripJudgeFields(row);
-    Object.assign(row, {
-      judge_error: 'provider_error',
-      judge_error_detail: redactSecrets(String(err?.message ?? s.error)).slice(0, JUDGE_RAW_MAX_CHARS),
-      judge_model: ctx.model,
-      judge_prompt_version: JUDGE_PROMPT_VERSION,
-    });
-    try { row.judge_config_hash = ctx.configHashFor(backfillInput(row, opts.questionByQid.get(row.question_id as string))); } catch { /* hasher failed: leave unstamped (re-judged on the next resume) */ }
+    Object.assign(row, errorJudgeFields(
+      ctx, judgePromptKind(input.question_id, input.question_type), configHash,
+      { judge_error: 'provider_error', detail: String(err?.message ?? s.error) },
+    ));
     result.errors++;
     opts.onRow?.(row);
   }

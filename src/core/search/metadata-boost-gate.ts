@@ -26,8 +26,16 @@
  *                 run ONLY when a lexical arm voted in fusion: a strict keyword
  *                 row, a title-arm row or a relational row reached
  *                 `composeFusionLists` (after the relaxed-row demotion). When
- *                 only vector / variant / clause / image arms voted, those
- *                 stages are skipped and the vector order stands.
+ *                 only vector / variant / clause arms voted, those stages are
+ *                 skipped and the vector order stands.
+ *   Image modality is exempt from `lexical`: hybrid.ts never runs the keyword
+ *   / title arms for an image query and excludes the relational arm from
+ *   fusion by construction, so "the lexical arms had a chance and did not
+ *   vote" cannot hold there — `lexicalVoted` is false for EVERY image query.
+ *   Skipping would silently disable backlink / salience / recency / graph
+ *   boosts for the whole modality, not just vector-only-voter queries. So an
+ *   image-modality decision applies the boosts (reason `image_modality`) even
+ *   under `lexical`; the caller passes `modality` from `effectiveModality`.
  *   Untouched in BOTH settings: the supersede downrank (correctness), the
  *   exact-match boost, the title-phrase boost (E1: 0 effect), the
  *   compiled-truth boost inside RRF, the cosine re-score, dedup, the reranker
@@ -49,6 +57,7 @@
  */
 
 import type { SearchResult } from '../types.ts';
+import type { ModalityMode } from './query-intent.ts';
 
 export type MetadataBoostGate = 'always' | 'lexical';
 
@@ -64,7 +73,9 @@ export type MetadataBoostGateReason =
   /** gate = lexical and a keyword / title / relational row fused: stages run. */
   | 'lexical_voted'
   /** gate = lexical and only vector-class arms voted: metadata stages skipped. */
-  | 'vector_only_voter';
+  | 'vector_only_voter'
+  /** gate = lexical but the query is image-modality: no lexical arm ever ran, so stages run. */
+  | 'image_modality';
 
 /** The decision, as stamped on `HybridSearchMeta.metadata_boost_gate`. */
 export interface MetadataBoostGateDecision {
@@ -127,17 +138,27 @@ export function lexicalArmsVoted(input: LexicalArmsVotedInput): boolean {
 export interface DecideMetadataBoostsInput {
   gate: MetadataBoostGate;
   lexicalVoted: boolean;
+  /**
+   * The query's effective modality (hybrid.ts `effectiveModality`). `image`
+   * exempts the query from `lexical` (see the module header); `text` / `both`
+   * / undefined take the normal vote-based decision.
+   */
+  modality?: ModalityMode;
 }
 
 /**
- * The decision. `always` → apply. `lexical` → apply iff a lexical arm voted.
+ * The decision. `always` → apply. `lexical` → apply iff a lexical arm voted,
+ * except image modality (no lexical arm ran) → apply, reason `image_modality`.
  * `boosts_applied === false` is the ONLY outcome that changes ranking; under
  * `always` every result is byte-identical to the pre-knob pipeline.
  */
 export function decideMetadataBoosts(input: DecideMetadataBoostsInput): MetadataBoostGateDecision {
-  const { gate, lexicalVoted } = input;
+  const { gate, lexicalVoted, modality } = input;
   if (gate === 'always') {
     return { gate, lexical_voted: lexicalVoted, boosts_applied: true, reason: 'gate_always' };
+  }
+  if (modality === 'image') {
+    return { gate, lexical_voted: lexicalVoted, boosts_applied: true, reason: 'image_modality' };
   }
   return lexicalVoted
     ? { gate, lexical_voted: true, boosts_applied: true, reason: 'lexical_voted' }

@@ -27,6 +27,7 @@ import {
   computeInnerLimit,
   contentTokens,
   emptyRanks,
+  errorRow,
   glossFor,
   h1Signature,
   h3Candidates,
@@ -278,6 +279,25 @@ describe('receipt parsing, top-k reading, split membership, summary, glossary', 
     expect(md).toContain('| temporal-reasoning |');
     expect(md).toContain('| a | temporal-reasoning | decision430, halfA430 |');
     expect(md).toContain('error: boom');
+  });
+  test('error text is secret-redacted on the receipt row AND in the markdown table', () => {
+    const q = { question_id: 'q', question_type: 't', question: 'q?', answer: '', haystack_sessions: [[]], haystack_session_ids: ['Sess_A'], answer_session_ids: ['Sess_A'] } as unknown as LongMemEvalQuestion;
+    const knobs = { reranker_top_n_in: 25 } as unknown as Parameters<typeof errorRow>[6];
+    const err = new Error('embed failed: postgres://user:hunter2@db.internal/brain api_key=sk-abcdefghijklmnop');
+    const row = errorRow(q, { question_id: 'q', retrieved_session_ids: [] } as never, 5, null, 50, 50, knobs, err);
+    expect(row.error).toContain('embed failed');
+    expect(row.error).not.toContain('hunter2');
+    expect(row.error).not.toContain('abcdefghijklmnop');
+    expect(row.missing).toEqual(['Sess_A']);
+    expect(row.primary_class).toBe('mixed');
+    // A non-Error throw is stringified.
+    expect(errorRow(q, { question_id: 'q' } as never, 5, null, 50, 50, knobs, 'plain string').error).toBe('plain string');
+    // The markdown renderer redacts too (a receipt written before redaction landed is still safe to render).
+    const rows = [syntheticRow({ question_id: 'e', error: 'token=sk-zyxwvutsrqponmlk boom' })];
+    const s = summarizeDiagnostics(rows, { k: 5, depth: 200, fusedLimit: 50, innerLimit: 50, rerankerTopNIn: 25, pins: { mode: 'balanced', reranker: false, autocut: false, expansion_variant_budget: null }, questionsScanned: 1 });
+    const md = renderDiagnosticsMarkdown(rows, s);
+    expect(md).toContain('boom');
+    expect(md).not.toContain('zyxwvutsrqponmlk');
   });
   test('glossFor reads the shared glossary for shared names and the local one otherwise', () => {
     expect(glossFor('recall_all@k')).toContain('gold session');

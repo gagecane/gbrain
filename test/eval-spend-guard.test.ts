@@ -49,6 +49,26 @@ function permissionsEnforced(): boolean {
 }
 const PERMS_ENFORCED = permissionsEnforced();
 
+// Same idea for READ bits: a chmod-000 file is still readable under
+// CAP_DAC_OVERRIDE; the unreadable-ledger pin needs the kernel to honor it.
+function readPermissionsEnforced(): boolean {
+  const d = mkdtempSync(join(tmpdir(), 'gbrain-spend-guard-probe-'));
+  try {
+    const f = join(d, 'noread');
+    writeFileSync(f, '{"cost_usd":1}\n');
+    chmodSync(f, 0o000);
+    try {
+      readFileSync(f);
+      return false;
+    } catch {
+      return true;
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+}
+const READ_PERMS_ENFORCED = readPermissionsEnforced();
+
 let dir: string;
 let ledger: string;
 beforeEach(() => {
@@ -79,8 +99,8 @@ function run(args: string[], extraEnv: Record<string, string> = {}) {
 }
 
 /** Async launch for the in-flight / signal pins. */
-function start(args: string[]) {
-  const child = spawn('bash', [SCRIPT, ...args], { cwd: ROOT, env: guardEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+function start(args: string[], extraEnv: Record<string, string> = {}) {
+  const child = spawn('bash', [SCRIPT, ...args], { cwd: ROOT, env: guardEnv(extraEnv), stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   child.stderr.on('data', (d: Buffer) => {
     stderr += d.toString();
@@ -253,7 +273,12 @@ describe('eval-spend-guard.sh', () => {
 
   test('a SIGTERMed guard stops the command and reconciles at the estimate (exit 143)', async () => {
     const g = start(['10', '4', '--', 'sleep', '30']);
-    await waitFor(() => runningRows().length === 1, 'the reservation row');
+    // Deterministic: the `reserved $` line is printed AFTER the reservation
+    // row lands and the traps are armed, so the signal can never race the
+    // guard's own setup (the pre-fix flake: traps were installed after the
+    // append, and a TERM in that window left the reservation unreconciled).
+    await waitFor(() => g.stderr().includes('reserved $4.000000'), "the 'reserved $' line");
+    expect(runningRows().length).toBe(1);
     const t0 = Date.now();
     g.child.kill('SIGTERM');
     const { code } = await g.exit;
@@ -284,6 +309,109 @@ describe('eval-spend-guard.sh', () => {
     const ok = run(['10', '6', '--', 'true']);
     expect(ok.status).toBe(0);
     expect(ok.stderr).toContain('1 in-flight reservation(s) counted at their estimate');
+  });
+
+  test('a command that ignores SIGTERM is SIGKILLed after the grace period; the guard still reconciles (exit 143)', async () => {
+    // The child traps TERM and would sleep on forever; with the grace knob at
+    // 1 s the guard escalates to KILL instead of waiting unbounded.
+    const g = start(['10', '4', '--', 'bash', '-c', 'trap "" TERM; sleep 30'], { GBRAIN_EVAL_SPEND_GUARD_KILL_GRACE_SECONDS: '1' });
+    await waitFor(() => g.stderr().includes('reserved $4.000000'), "the 'reserved $' line");
+    // Let the child install its trap before we signal.
+    await new Promise((r) => setTimeout(r, 300));
+    const t0 = Date.now();
+    g.child.kill('SIGTERM');
+    const { code } = await g.exit;
+    const elapsed = Date.now() - t0;
+    expect(code).toBe(143);
+    expect(elapsed).toBeGreaterThanOrEqual(900);
+    expect(elapsed).toBeLessThan(8_000); // not the child's 30 s
+    expect(g.stderr()).toContain('did not exit within 1s of SIGTERM — sending SIGKILL');
+    const rows = ledgerRows();
+    expect(rows.length).toBe(2);
+    expect(rows[1].status).toBe('done');
+    expect(rows[1].cost_usd).toBe(4);
+    expect(rows[1].exit_code).toBe(143);
+  }, 15_000);
+
+  test.skipIf(!READ_PERMS_ENFORCED)('an existing but unreadable ledger refuses the launch (exit 3) instead of auditing as $0', () => {
+    // gawk exits 0 with an all-zero END line on a file it cannot open — pre-fix
+    // that read as "$0 spent" and the launch proceeded against an empty audit.
+    writeFileSync(ledger, '{"cost_usd":70}\n');
+    chmodSync(ledger, 0o000);
+    const marker = join(dir, 'should-not-exist.txt');
+    const r = run(['75', '1', '--', 'sh', '-c', `echo no > "${marker}"`]);
+    expect(r.status).toBe(3);
+    expect(existsSync(marker)).toBe(false);
+    expect(r.stderr).toContain('cannot audit ledger');
+    expect(r.stderr).toContain('not readable');
+    expect(r.stderr).toContain('command NOT run');
+    expect(r.stderr).not.toContain('launching');
+    chmodSync(ledger, 0o644);
+    expect(ledgerRows().length).toBe(1); // nothing appended
+  });
+
+  test('an audit awk cannot vouch for (non-zero exit, or a malformed audit line) refuses the launch — never a $0 read', () => {
+    // Perms-independent twin of the unreadable-ledger pin: a PATH shim replaces
+    // awk ONLY for the ledger-audit call (every other awk use — norm6, the cap
+    // arithmetic — delegates to the real binary).
+    const realAwk = spawnSync('bash', ['-c', 'command -v awk'], { encoding: 'utf-8' }).stdout.trim();
+    expect(realAwk.length).toBeGreaterThan(0);
+    const shimDir = join(dir, 'shim');
+    mkdirSync(shimDir);
+    const shim = (body: string) => {
+      writeFileSync(
+        join(shimDir, 'awk'),
+        `#!/bin/bash\nfor a in "$@"; do case "$a" in *spend.jsonl) ${body} ;; esac; done\nexec "${realAwk}" "$@"\n`,
+      );
+      chmodSync(join(shimDir, 'awk'), 0o755);
+    };
+    writeFileSync(ledger, '{"cost_usd":70}\n');
+    const marker = join(dir, 'should-not-exist.txt');
+    const env = { PATH: `${shimDir}:${process.env.PATH ?? '/usr/bin:/bin'}` };
+
+    // awk dies mid-audit (e.g. an I/O error): refused, nothing appended.
+    shim('exit 2');
+    const r1 = run(['75', '1', '--', 'sh', '-c', `echo no > "${marker}"`], env);
+    expect(r1.status).toBe(3);
+    expect(r1.stderr).toContain('cannot audit ledger');
+    expect(r1.stderr).toContain('awk exited 2');
+    expect(existsSync(marker)).toBe(false);
+
+    // awk exits 0 but prints an EMPTY line (the gawk unreadable-file shape).
+    shim('echo ""; exit 0');
+    const r2 = run(['75', '1', '--', 'sh', '-c', `echo no > "${marker}"`], env);
+    expect(r2.status).toBe(3);
+    expect(r2.stderr).toContain('audit line is malformed');
+    expect(r2.stderr).not.toContain('launching');
+
+    // …or a non-numeric total.
+    shim('echo "1 1 NaN 0"; exit 0');
+    const r3 = run(['75', '1', '--', 'sh', '-c', `echo no > "${marker}"`], env);
+    expect(r3.status).toBe(3);
+    expect(r3.stderr).toContain('audit line is malformed');
+    expect(existsSync(marker)).toBe(false);
+    expect(ledgerRows().length).toBe(1); // untouched throughout
+
+    // Control: the real awk through the same PATH still launches (70 + 1 <= 75).
+    rmSync(join(shimDir, 'awk'));
+    const ok = run(['75', '1', '--', 'true'], env);
+    expect(ok.status).toBe(0);
+    expect(ok.stderr).toContain('ledger $70.000000 (1 row(s))');
+  });
+
+  test('command text with tabs, CR and other control characters is escaped into valid JSON (no GNU-sed \\t dependency)', () => {
+    const r = run(['75', '1', '--', 'sh', '-c', 'true # tab\there cr\rhere bell\u0001here']);
+    expect(r.status).toBe(0);
+    const raw = readFileSync(ledger, 'utf-8');
+    expect(raw).toContain('tab\\there');
+    expect(raw).toContain('cr\\rhere');
+    expect(raw).toContain('bell\\u0001here');
+    // No raw control byte reached the file …
+    expect(/[\u0000-\u001f]/.test(raw.replace(/\n/g, ''))).toBe(false);
+    // … and JSON.parse round-trips the exact command text.
+    const rows = ledgerRows();
+    expect(rows.length).toBe(2);
+    for (const row of rows) expect(String(row.command)).toBe('sh -c true # tab\there cr\rhere bell\u0001here');
   });
 
   test('audit: legacy rows are final, an orphan reservation counts, a reconciled reservation does not, a run_id-less running row is final', () => {

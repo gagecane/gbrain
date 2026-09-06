@@ -39,7 +39,7 @@
 
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { embedMany } from 'ai';
 import {
@@ -83,6 +83,8 @@ export class EmbedCacheIntegrityError extends Error {
 
 const BUSY_TIMEOUT_MS = 10_000;
 const BUSY_RETRIES = 3;
+/** fileSha256 read-chunk size: bounded memory regardless of cache size. */
+const FILE_HASH_CHUNK_BYTES = 1 << 20;
 
 function sha256Hex(data: string | Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');
@@ -300,6 +302,12 @@ export class EmbeddingCache {
    * WAL is folded into the main file, then sha256 over the canonical sorted
    * rows `key \0 dims \0 sha256(vector) \n`. Independent of insertion order
    * and WAL state; stable across close/reopen.
+   *
+   * Streams: rows are pulled one at a time through the statement's
+   * `iterate()` (a wave-sized cache holds hundreds of MB of vectors, which
+   * `.all()` would materialize at once). The hash INPUT is byte-identical to
+   * the eager form — same `ORDER BY key`, same separators — so the value is
+   * stable across this change (pinned by test/longmemeval-embed-cache.test.ts).
    */
   canonicalSha256(): string {
     const db = this.requireDb();
@@ -315,15 +323,16 @@ export class EmbeddingCache {
       .query<{ key: string; dims: number; vector: Uint8Array }, []>(
         'SELECT key, dims, vector FROM embed_cache ORDER BY key',
       )
-      .all();
+      .iterate();
     for (const r of rows) {
-      h.update(r.key).update(' ').update(String(r.dims)).update(' ').update(sha256Hex(r.vector)).update('\n');
+      h.update(r.key).update('\0').update(String(r.dims)).update('\0').update(sha256Hex(r.vector)).update('\n');
     }
     return h.digest('hex');
   }
 
-  /** sha256 of the main database file bytes (after a checkpoint). Cheap
-   *  complement to `canonicalSha256` for `run_config.cache`. */
+  /** sha256 of the main database file bytes (after a checkpoint), read in
+   *  fixed-size chunks — never the whole file in memory. Cheap complement to
+   *  `canonicalSha256` for `run_config.cache`. */
   fileSha256(): string {
     const db = this.requireDb();
     if (this.txDepth === 0) {
@@ -333,7 +342,19 @@ export class EmbeddingCache {
         /* best-effort */
       }
     }
-    return sha256Hex(readFileSync(this.path));
+    const h = createHash('sha256');
+    const fd = openSync(this.path, 'r');
+    try {
+      const buf = new Uint8Array(FILE_HASH_CHUNK_BYTES);
+      for (;;) {
+        const n = readSync(fd, buf, 0, buf.byteLength, null);
+        if (n <= 0) break;
+        h.update(buf.subarray(0, n));
+      }
+    } finally {
+      closeSync(fd);
+    }
+    return h.digest('hex');
   }
 
   close(): void {

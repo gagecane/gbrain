@@ -20,9 +20,16 @@
  *     emitted but stay out of the recall denominators unless
  *     `--include-abstention`.
  *   - Every retrieval pin (mode, reranker, autocut, expansion, variant
- *     budget, embedder, top-k, trajectory) PLUS the resolved `knobs_hash`
- *     is hashed into `retrieval_config_hash` on every row; resume refuses a
- *     mixed file (a snapshot differing in any non-pin knob is a different run).
+ *     budget, embedder, top-k, trajectory, and the raw `--search-pin` map
+ *     when non-empty) PLUS the resolved `knobs_hash` is hashed into
+ *     `retrieval_config_hash` on every row; resume refuses a mixed file (a
+ *     snapshot differing in any non-pin knob is a different run). Explicit
+ *     flags beat a `--search-pin` of the same key everywhere (config write
+ *     order, resolvePins, the hash and the gates).
+ *   - The reranker preflight (exit 2) and the un-reranked-rows gate (exit 1)
+ *     key on the RESOLVED reranker pin — flag, --search-pin, snapshot or
+ *     bundle — so a configured-but-silently-skipped reranker never exits 0.
+ *     A run in which every question errored and no row was scored exits 1.
  *   - Silent degradation is a gate, not a footnote: on a non-keyword-only
  *     run a row whose vector arm fell back to keyword-only
  *     (`vector_enabled:false`, `embed_unavailable`, `embed_timeout`) or whose
@@ -52,9 +59,8 @@
 import { homedir } from 'os';
 import { join } from 'path';
 import { execSync } from 'child_process';
-import type Anthropic from '@anthropic-ai/sdk';
 import { withBenchmarkBrain, resetTables } from '../eval/longmemeval/harness.ts';
-import { haystackToPages } from '../eval/longmemeval/adapter.ts';
+import { haystackToPages, normalizeSessions } from '../eval/longmemeval/adapter.ts';
 import {
   READER_MAX_TOKENS,
   READER_PROMPT_SHA,
@@ -64,9 +70,12 @@ import {
 } from '../eval/longmemeval/reader.ts';
 import {
   DEFAULT_JUDGE_MODEL,
+  JUDGE_MAX_TOKENS,
   JUDGE_METHODOLOGY_NOTE,
   JUDGE_PROMPT_VERSION,
+  JUDGE_RAW_MAX_CHARS,
   judgeRow,
+  stripJudgeFields,
   type JudgeLaneContext,
 } from '../eval/longmemeval/judge.ts';
 import {
@@ -87,6 +96,7 @@ import {
   buildSlugToRawMap,
   collisionsTouchingGold,
   detectSlugCollisions,
+  isAbstentionQuestion,
   newBucket,
   sessionIdFromSlug,
   type ByTypeSummaryContext,
@@ -109,6 +119,7 @@ import {
   checkResumeConfigHash,
   classifyDegradation,
   countDegradation,
+  isScoredQuestionRow,
   loadExpansionReplay,
   loadResumeSet,
   readJsonlRows,
@@ -119,8 +130,11 @@ import { EmbeddingCache, installEmbedCache, type EmbedTransportFn, type Installe
 import { importFromContent } from '../core/import-file.ts';
 import { hybridSearch, type HybridSearchOpts } from '../core/search/hybrid.ts';
 import { expandQuery } from '../core/search/expansion.ts';
+import { normalizeExpansionVariantBudget } from '../core/search/fusion-lists.ts';
 import {
   KNOBS_HASH_VERSION,
+  SEARCH_MODES,
+  isSearchMode,
   knobsHash,
   loadOverridesFromConfig,
   resolveSearchMode,
@@ -135,6 +149,8 @@ import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts'
 import type { PGLiteEngine } from '../core/pglite-engine.ts';
 import type { HybridSearchMeta, SearchResult } from '../core/types.ts';
 import { classifyIntent, type Intent } from '../eval/longmemeval/intent.ts';
+import { makeGatewayThinkClient } from '../eval/longmemeval/gateway-client.ts';
+import { EMPTY_TRAJECTORY_ROUTE, routeTrajectory, type TrajectoryRoute } from '../eval/longmemeval/trajectory-route.ts';
 import {
   extractAndInsertClaims,
   makeAliasMap,
@@ -142,13 +158,10 @@ import {
   getCacheStats,
   type AliasMap,
 } from '../eval/longmemeval/extract.ts';
-import { extractCandidateEntities } from '../core/think/entity-extract.ts';
 import { normalizeModelId } from '../core/model-id.ts';
 import { chat as gatewayChat, getEmbeddingDimensions, getEmbeddingModel, isAvailable } from '../core/ai/gateway.ts';
 import { rerankerReadinessForEngine, type EngineReadiness } from '../core/ai/reranker-readiness-engine.ts';
 import { describeRerankerFix } from '../core/ai/reranker-readiness.ts';
-import { resolveEntitySlugWithSource, type ResolutionSource } from '../core/entities/resolve.ts';
-import { formatTrajectoryBlock } from '../core/trajectory-format.ts';
 import { persistRunRecord, type EvalRunRecord } from './eval-run-all.ts';
 
 // Back-compat re-exports (these used to live here; tests + consumers import from the harness).
@@ -166,8 +179,6 @@ const HUGGINGFACE_URL = 'https://huggingface.co/datasets/xiaowu0162/longmemeval'
 
 const DEFAULT_EMBED_CACHE_PATH = join(homedir(), '.cache', 'gbrain-eval', 'longmemeval-embed.sqlite');
 
-const SEARCH_MODES_LIST: readonly SearchMode[] = ['conservative', 'balanced', 'tokenmax'];
-
 type FloorMetric = 'recall_all' | 'recall_any';
 
 interface ParsedArgs {
@@ -182,7 +193,7 @@ interface ParsedArgs {
   expansionReplayPath?: string;
   /** undefined = not pinned (config/bundle decides); null = legacy weighting. */
   expansionVariantBudget?: number | null;
-  /** --search-pin key=value (repeatable): extra `search.*` config pins written before the run and folded into the knobs hash. */
+  /** --search-pin key=value (repeatable): extra `search.*` config pins written before the explicit flags and folded into retrieval_config_hash. */
   searchPins?: Record<string, string>;
   topK: number;
   outputPath?: string;
@@ -258,7 +269,10 @@ const LME_FLAGS: LmeFlag[] = [
   { name: '--search-pin', arg: 'KEY=VALUE', help: [
       'Pin an arbitrary `search.*` config key for the run (repeatable; last wins).',
       'Generic pass-through for knob A/Bs (e.g. search.metadata_boost_gate=lexical);',
-      'the value is written via engine.setConfig and folds into the knobs hash.'],
+      'the value is written via engine.setConfig BEFORE the explicit flags, so',
+      '--mode/--reranker/--autocut/--expansion-variant-budget beat a pin of the',
+      'same key. Every pin folds into retrieval_config_hash (keys the mode',
+      'resolver parses also reach knobs_hash); unknown keys are set verbatim.'],
     apply: (o, v) => {
       const eq = v.indexOf('=');
       if (eq <= 0) throw new Error(`--search-pin takes KEY=VALUE (got: ${v})`);
@@ -271,29 +285,28 @@ const LME_FLAGS: LmeFlag[] = [
       'or a number in (0, 4] — the total RRF weight shared equally by all',
       'expansion variant lists (the original list always keeps weight 1).'],
     apply: (o, v) => {
-      const s = v.trim().toLowerCase();
-      if (s === 'legacy' || s === 'null') { o.expansionVariantBudget = null; return; }
-      const n = Number(s);
-      if (!Number.isFinite(n) || n <= 0 || n > 4) throw new Error(`--expansion-variant-budget must be legacy or a number in (0, 4] (got: ${v})`);
-      o.expansionVariantBudget = n;
+      const b = normalizeExpansionVariantBudget(v);
+      if (b === undefined) throw new Error(`--expansion-variant-budget must be legacy or a number in (0, 4] (got: ${v})`);
+      o.expansionVariantBudget = b;
     } },
   { name: '--top-k', arg: 'K', help: [
       'Retrieve K chunk rows per question (default: 8). recall_*@k is scored over',
       'the distinct sessions among those K rows (k = K).'],
     apply: (o, v) => { o.topK = Number(v); if (!Number.isInteger(o.topK) || o.topK < 1) throw new Error(`--top-k must be a positive integer (got: ${v})`); } },
   { name: '--mode', arg: 'M', help: [
-      'Search mode: conservative|balanced|tokenmax. Resolves through',
+      `Search mode: ${SEARCH_MODES.join('|')}. Resolves through`,
       'src/core/search/mode.ts so retrieval matches production under that mode.',
       'NOTE: no mode implies --expansion (see --expansion).'],
     apply: (o, v) => {
-      if (!(SEARCH_MODES_LIST as readonly string[]).includes(v)) throw new Error(`--mode must be one of conservative|balanced|tokenmax (got: ${v})`);
-      o.mode = v as SearchMode;
+      if (!isSearchMode(v)) throw new Error(`--mode must be one of ${SEARCH_MODES.join('|')} (got: ${v})`);
+      o.mode = v;
     } },
   { name: '--reranker', arg: 'on|off', help: [
-      'Pin `search.reranker.enabled` for the run (beats any injected snapshot).',
-      'With `on`: readiness preflight (exit 2 with the fix if the reranker cannot',
-      'run) and the run exits non-zero if any row fell through un-reranked',
-      '(`reranker_skipped_rows` in the summary).'],
+      'Pin `search.reranker.enabled` for the run (beats any injected snapshot or',
+      '--search-pin). Whenever the RESOLVED pin is on (this flag, a --search-pin,',
+      'the snapshot or the mode bundle): readiness preflight (exit 2 with the fix',
+      'if the reranker cannot run) and the run exits non-zero if any row fell',
+      'through un-reranked (`reranker_skipped_rows` in the summary).'],
     apply: (o, v) => { o.reranker = parseOnOff('--reranker', v); } },
   { name: '--autocut', arg: 'on|off', help: ['Pin `search.autocut` for the run (beats any injected snapshot).'],
     apply: (o, v) => { o.autocut = parseOnOff('--autocut', v); } },
@@ -356,7 +369,7 @@ const LME_FLAGS: LmeFlag[] = [
     apply: (o) => { o.record = true; } },
   { name: '--judge', help: [
       'LLM-judge each answer against the gold with the official LongMemEval',
-      'evaluate_qa.py prompts (temperature 0, max_tokens 10). Implies --by-type:',
+      `evaluate_qa.py prompts (temperature 0, max_tokens ${JUDGE_MAX_TOKENS}). Implies --by-type:`,
       'the summary line gains a qa_accuracy block whose headline scores judge',
       'errors as incorrect. Incompatible with --retrieval-only. With',
       '--resume-from FILE: judge-only backfill of rows lacking a settled verdict',
@@ -379,9 +392,9 @@ const LME_FLAGS: LmeFlag[] = [
       'rows are judged inline after each reader call).'],
     apply: (o, v) => { o.judgeConcurrency = Number(v); if (!Number.isInteger(o.judgeConcurrency) || o.judgeConcurrency < 1) throw new Error(`--judge-concurrency must be a positive integer (got: ${v})`); } },
   { name: '--allow-incomplete-judgments', help: [
-      'Exit 0 even when judge_errors > 0 or skipped_budget > 0. Default: such a',
-      'run is NOT publishable (stderr FAIL line + exit 1) — re-run with --judge',
-      '--resume-from FILE until both are 0.'],
+      'Exit 0 even when judge_errors, skipped_budget or unjudged > 0. Default:',
+      'such a run is NOT publishable (stderr FAIL line + exit 1) — re-run with',
+      '--judge --resume-from FILE until all three are 0.'],
     apply: (o) => { o.allowIncompleteJudgments = true; } },
 ];
 
@@ -426,6 +439,7 @@ function parseArgs(args: string[]): ParsedArgs {
       continue;
     }
     if (!out.datasetPath) { out.datasetPath = a; continue; }
+    throw new Error(`unexpected extra argument "${a}" (only one <dataset.jsonl> positional is accepted; see --help)`);
   }
   if (out.judge && out.retrievalOnly) {
     throw new Error('--judge cannot be combined with --retrieval-only (there is no reader hypothesis to judge)');
@@ -558,6 +572,11 @@ function resolvePins(opts: ParsedArgs, runOpts: RunOpts, trajectoryEnabled: bool
   });
   let embedder = 'unconfigured';
   try { embedder = `${getEmbeddingModel()}@${getEmbeddingDimensions()}`; } catch { /* no gateway configured */ }
+  // Raw --search-pin map, sorted, folded into retrieval_config_hash ONLY when
+  // non-empty (a pin the mode resolver does not parse never reaches knobs_hash,
+  // yet still changes ranking — two differently-pinned runs must not merge).
+  const pinKeys = Object.keys(opts.searchPins ?? {}).sort();
+  const searchPins = pinKeys.length > 0 ? Object.fromEntries(pinKeys.map(k => [k, opts.searchPins![k]])) : undefined;
   const pins: RetrievalPins = {
     mode: knobs.resolved_mode,
     keyword_only: opts.keywordOnly,
@@ -568,6 +587,7 @@ function resolvePins(opts: ParsedArgs, runOpts: RunOpts, trajectoryEnabled: bool
     embedder,
     top_k: opts.topK,
     trajectory: trajectoryEnabled,
+    ...(searchPins ? { search_pins: searchPins } : {}),
   };
   return { pins, knobs };
 }
@@ -626,6 +646,12 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
   }
   // Gold by question_id for resume re-scoring (dataset is loaded on resume).
   const goldByQid = new Map<string, readonly string[]>(questions.map(q => [q.question_id, q.answer_session_ids ?? []]));
+  // RAW haystack ids by question_id: a pre-stamp resume row carries slug-normalized
+  // ids, which the re-scorer maps back to raw ids through this map.
+  const haystackByQid = new Map<string, readonly string[]>(questions.map(q => {
+    try { return [q.question_id, normalizeSessions(q).map(x => x.session_id)] as const; } catch { return [q.question_id, []] as const; }
+  }));
+  const seedCtx = (k: number, includeAbstention: boolean) => ({ goldByQid, haystackByQid, k, includeAbstention });
   /** Dataset row by id — the judge backfill takes question_type / answer from the dataset, not the row. */
   const questionByQid = new Map<string, DatasetQuestion>(questions.map(q => [q.question_id, q]));
 
@@ -794,8 +820,17 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
         }
       }
     }
-    if (opts.reranker === true && st.rerankerSkippedRows > 0) {
-      process.stderr.write(`[longmemeval] FAIL --reranker on: ${st.rerankerSkippedRows} row(s) fell through un-reranked (reranker_skipped / rerank_passthrough)\n`);
+    // Gate on the RESOLVED reranker pin (flag, --search-pin, snapshot or bundle),
+    // not the flag alone: a configured-but-silently-skipped reranker never exits 0.
+    if (pins.reranker.enabled && st.rerankerSkippedRows > 0) {
+      process.stderr.write(`[longmemeval] FAIL reranker on (resolved pin): ${st.rerankerSkippedRows} row(s) fell through un-reranked (reranker_skipped / rerank_passthrough) — pass --reranker off or set the reranker provider key (e.g. VOYAGE_API_KEY)\n`);
+      exitCode = 1;
+    }
+    // Every question of this run errored AND the output holds no scored row
+    // (prior resume rows included): the buckets are empty, every rate is null
+    // and the floor gate is vacuous — such a run is a failure, never 'completed'.
+    if (st.questionsRun > 0 && st.errorCount === st.questionsRun && !st.qaRows.some(isScoredQuestionRow)) {
+      process.stderr.write(`[longmemeval] FAIL every question errored (${st.errorCount}/${st.questionsRun}) — no row was scored; see the error rows${st.errorMessages.length > 0 ? ` (first: ${st.errorMessages[0]})` : ''}\n`);
       exitCode = 1;
     }
     if (!opts.keywordOnly && st.vectorDegradedRows > 0) {
@@ -913,7 +948,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
       if (opts.judge && opts.outputPath && opts.outputPath !== opts.resumeFromPath) {
         // A judge resume into a DIFFERENT output still copies the prior rows
         // forward, so the new file is complete (rows + the summary below).
-        const em = makeEmitter(opts.outputPath, false, { atomicRewrite: !!opts.outputPath && opts.resumeFromPath === opts.outputPath });
+        const em = makeEmitter(opts.outputPath, false);
         for (const row of priorRows) if (row.kind !== 'by_type_summary' && typeof row.question_id === 'string') em.emit(row);
         em.close();
       }
@@ -921,7 +956,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
       // rows (CDX-3 + review): --by-type emission, the floor gate, the
       // reranker / vector-degraded / expansion gates, and --record.
       const buckets: Record<string, RecallBucket> = {};
-      const seed = seedBucketsFromRows(priorRows, buckets, { goldByQid, k: opts.topK, includeAbstention: opts.includeAbstention });
+      const seed = seedBucketsFromRows(priorRows, buckets, seedCtx(opts.topK, opts.includeAbstention));
       const deg = countDegradation(priorRows, degradeOpts);
       finishRun({
         buckets,
@@ -960,43 +995,8 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
   }
 
   // #4636: BOTH chat lanes (answer generation + trajectory claim extractor)
-  // route through the configured AI gateway — the same provider routing the
-  // rest of the brain uses. gateway.chat parses `provider:model` recipe ids,
-  // so resolveModel's output passes through UN-stripped.
-  const gatewayClient: ThinkLLMClient = {
-    create: async (params) => {
-      const system = typeof params.system === 'string'
-        ? params.system
-        : Array.isArray(params.system)
-          ? params.system.map(b => ('text' in b ? b.text : '')).join('')
-          : undefined;
-      const messages = params.messages.map(m => ({
-        role: m.role,
-        content: typeof m.content === 'string'
-          ? m.content
-          : Array.isArray(m.content)
-            ? m.content.map(b => ('text' in b ? b.text : '')).join('')
-            : '',
-      }));
-      const result = await gatewayChat({
-        model: normalizeModelId(params.model),
-        system,
-        messages,
-        maxTokens: params.max_tokens,
-      });
-      return {
-        id: '',
-        type: 'message',
-        role: 'assistant',
-        // The provider-reported snapshot id (D30) when the SDK surfaced one,
-        // else the requested id — mirrors what the Anthropic SDK's `message.model` carries.
-        model: result.responseModel ?? result.model,
-        content: [{ type: 'text', text: result.text }],
-        usage: { input_tokens: result.usage.input_tokens, output_tokens: result.usage.output_tokens },
-        stop_reason: result.stopReason === 'length' ? 'max_tokens' : 'end_turn',
-      } as unknown as Anthropic.Message;
-    },
-  };
+  // route through the configured AI gateway (gateway-client.ts).
+  const gatewayClient: ThinkLLMClient = makeGatewayThinkClient();
   const client: ThinkLLMClient = runOpts.client ?? gatewayClient;
   const extractorClient: ThinkLLMClient = runOpts.extractorClient ?? gatewayClient;
   const extractorModel = trajectoryEnabled
@@ -1074,7 +1074,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     expansionFailedRows += deg.expansionFailed;
   }
   if (opts.byType && opts.resumeFromPath) {
-    const seed = seedBucketsFromRows(keptPrior, buckets, { goldByQid, k: opts.topK, includeAbstention: opts.includeAbstention });
+    const seed = seedBucketsFromRows(keptPrior, buckets, seedCtx(opts.topK, opts.includeAbstention));
     distinct.push(...seed.distinct);
     excludedAbstention += seed.excludedAbstention;
     goldMissing += seed.goldMissing;
@@ -1112,20 +1112,24 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     for (const [key, value] of Object.entries(runOpts.searchConfigSnapshot ?? {})) {
       if (key.trim().length > 0) await engine.setConfig(key, value);
     }
-    // Explicit pins beat the snapshot. resetTables preserves `config` between
-    // questions, so these fire once for the run; hybridSearch resolves them
-    // through the standard chain.
+    // Raw --search-pin entries land next, then the explicit flags, so an
+    // explicit --mode/--reranker/--autocut/--expansion-variant-budget beats a
+    // --search-pin of the same key — the SAME precedence resolvePins used for
+    // retrieval_config_hash / run_config / the gates. resetTables preserves
+    // `config` between questions, so these fire once for the run; hybridSearch
+    // resolves them through the standard chain.
+    for (const [k, v] of Object.entries(opts.searchPins ?? {})) await engine.setConfig(k, v);
     if (opts.mode) await engine.setConfig('search.mode', opts.mode);
     if (opts.reranker !== undefined) await engine.setConfig('search.reranker.enabled', opts.reranker ? 'true' : 'false');
     if (opts.autocut !== undefined) await engine.setConfig('search.autocut', opts.autocut ? 'true' : 'false');
-    for (const [k, v] of Object.entries(opts.searchPins ?? {})) await engine.setConfig(k, v);
     if (opts.expansionVariantBudget !== undefined) {
       await engine.setConfig('search.expansion_variant_budget', opts.expansionVariantBudget === null ? 'legacy' : String(opts.expansionVariantBudget));
     }
 
-    // --reranker on: preflight. A reranker that cannot run would silently
-    // turn every row into RRF order (reranker_skipped) — refuse up front.
-    if (opts.reranker === true) {
+    // Resolved reranker pin on (flag, --search-pin, snapshot or bundle):
+    // preflight. A reranker that cannot run would silently turn every row
+    // into RRF order (reranker_skipped) — refuse up front.
+    if (pins.reranker.enabled) {
       const probe = runOpts.rerankerReadiness ?? rerankerReadinessForEngine;
       const r = await probe(engine, pins.reranker.model);
       if (!r.readiness.ready) {
@@ -1160,10 +1164,12 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     const c = cache;
     ctx.embedTxn = c ? (fn) => c.withTransaction(fn) : (fn) => fn();
 
-    // Rewrite-in-place (judge backfill re-emits the prior rows): write to a
-    // temp file and rename on close so a kill mid-run never truncates the
-    // resume file (the paid reader rows) to zero bytes.
-    const emitter = makeEmitter(opts.outputPath, appendOutput, { atomicRewrite: !!opts.outputPath && opts.resumeFromPath === opts.outputPath });
+    // Same-file resume APPENDS every new / judged / retried row as it lands
+    // (a kill mid-run loses at most the in-flight question, never the paid
+    // reader rows) and compacts to one row per question_id in the finally
+    // below; a fresh output path (no resume, or a resume into a different
+    // file) is truncated and the prior rows are carried forward explicitly.
+    const emitter = makeEmitter(opts.outputPath, appendOutput);
     progress.start('eval.longmemeval', backfill.length + questions.length);
     try {
       // Judge-only backfill first (prior rows, no reader call), then re-emit
@@ -1193,12 +1199,27 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
         try {
           const outcome = await runOneQuestion(engine, q, ctx);
           if (judgeCtx) {
-            // Judge inline from the row's hypothesis (the same path the backfill takes).
-            Object.assign(outcome.row, await judgeRow({
-              ...outcome.row,
-              question_id: q.question_id, question_type: q.question_type, question: q.question,
-              answer: String(q.answer ?? ''), hypothesis: outcome.row.hypothesis, // 32 LongMemEval golds are integers
-            }, judgeCtx));
+            // Judge inline from the row's hypothesis (the same path the backfill
+            // takes). A judge THROW (judgeRow never throws for a transport
+            // failure, but a malformed provider result / hasher bug can) is a
+            // judge_error on the row — the paid reader row is kept, mirroring
+            // runJudgeBackfill's failure stamp — never an error row.
+            try {
+              Object.assign(outcome.row, await judgeRow({
+                ...outcome.row,
+                question_id: q.question_id, question_type: q.question_type, question: q.question,
+                answer: String(q.answer ?? ''), hypothesis: outcome.row.hypothesis, // 32 LongMemEval golds are integers
+              }, judgeCtx));
+            } catch (judgeErr: any) {
+              stripJudgeFields(outcome.row as unknown as Record<string, unknown>);
+              Object.assign(outcome.row, {
+                judge_error: 'provider_error',
+                judge_error_detail: redactSecrets(String(judgeErr?.message ?? judgeErr)).slice(0, JUDGE_RAW_MAX_CHARS),
+                judge_model: judgeCtx.model,
+                judge_prompt_version: JUDGE_PROMPT_VERSION,
+                judge_config_hash: runJudgeHash,
+              });
+            }
           }
           emitter.emit(outcome.row);
           qaRows.push(outcome.row);
@@ -1298,7 +1319,7 @@ async function runOneQuestion(
   if (goldCollisions.length > 0) {
     throw new QuestionAbort(
       `slug_collision touches a gold session id (${goldCollisions.map(s => `${s} <- ${(slugToRaw.get(s) ?? []).join(' / ')}`).join('; ')})`,
-      { slug_collision: detectSlugCollisions(slugToRaw).length, slug_collision_gold: goldCollisions, abstention: /_abs$/.test(q.question_id) },
+      { slug_collision: detectSlugCollisions(slugToRaw).length, slug_collision_gold: goldCollisions, abstention: isAbstentionQuestion(q.question_id) },
     );
   }
   // --expansion-replay: a question with no recorded variants is an error row
@@ -1374,48 +1395,11 @@ async function runOneQuestion(
   });
 
   // Trajectory routing for temporal / knowledge_update intents. Skips for
-  // 'other' or when --no-trajectory.
-  let trajectoryBlock = '';
-  let trajectoryPoints = 0;
-  let entityResolved: string | null = null;
-  let resolutionSource: ResolutionSource | null = null;
+  // 'other' or when --no-trajectory. Best-effort (trajectory-route.ts).
   const intent: Intent = ctx.trajectoryEnabled ? classifyIntent(q) : 'other';
-  if (ctx.trajectoryEnabled && intent !== 'other') {
-    try {
-      const retrievedSlugs = results.map(r => r.slug);
-      const candidates = extractCandidateEntities(q.question, retrievedSlugs);
-      for (const cand of candidates) {
-        const resolved = await resolveEntitySlugWithSource(engine, 'default', cand.raw);
-        if (!resolved) continue;
-        // Unlike the think production path, the harness does NOT skip
-        // fallback_slugify results: the extractor and the lookup both slugify
-        // free-form entity names, so they cohere on the same fallback slug
-        // and there are no canonical pages in the benchmark to protect.
-        const points = await Promise.race([
-          engine.findTrajectory({
-            entitySlug: resolved.slug,
-            sourceId: 'default',
-            remote: false,
-            kind: 'all',
-            limit: 100,
-          }),
-          new Promise<import('../core/engine.ts').TrajectoryPoint[]>(resolve => {
-            setTimeout(() => resolve([]), 5000);
-          }),
-        ]);
-        if (points.length === 0) continue;
-        const fmt = formatTrajectoryBlock(points, resolved.slug, { intent });
-        if (fmt.rendered.length === 0) continue;
-        trajectoryBlock = fmt.rendered;
-        trajectoryPoints = fmt.emittedPoints;
-        entityResolved = resolved.slug;
-        resolutionSource = resolved.source;
-        break;
-      }
-    } catch {
-      // Best-effort: any error degrades to "no block injected".
-    }
-  }
+  const route: TrajectoryRoute = ctx.trajectoryEnabled && intent !== 'other'
+    ? await routeTrajectory(engine, q.question, results.map(r => r.slug), intent)
+    : EMPTY_TRAJECTORY_ROUTE;
 
   // Reader pins (D30) ride every answered row: requested model, the
   // provider-reported snapshot when it differs, the system-prompt sha and the
@@ -1427,7 +1411,11 @@ async function runOneQuestion(
     hypothesis = renderRetrievedAsHypothesis(results, slugToRaw);
     readerFields = { retrieval_only: true };
   } else {
-    const answer = await generateAnswer(ctx.client, q, results, pageMeta, slugToRaw, ctx.model, trajectoryBlock);
+    // The gateway is called with the NORMALIZED id (gatewayClient normalizes
+    // again, idempotently), so the snapshot comparison inside generateAnswer
+    // sees the same string the provider echoes — a bare alias never shows up
+    // as a fake `reader_model_snapshot`.
+    const answer = await generateAnswer(ctx.client, q, results, pageMeta, slugToRaw, normalizeModelId(ctx.model), route.block);
     hypothesis = answer.text;
     readerFields = {
       reader_model: ctx.model,
@@ -1460,9 +1448,9 @@ async function runOneQuestion(
     ...(expansionReplayed ? { expansion_replayed: true } : {}),
     ...(ctx.trajectoryEnabled ? {
       intent,
-      trajectory_points: trajectoryPoints,
-      entity_resolved: entityResolved,
-      resolution_source: resolutionSource,
+      trajectory_points: route.points,
+      entity_resolved: route.entityResolved,
+      resolution_source: route.resolutionSource,
       methodology_note: TRAJECTORY_METHODOLOGY_NOTE,
     } : {}),
   };

@@ -9,7 +9,8 @@
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, statSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -164,6 +165,43 @@ describe('EmbeddingCache — canonical hash', () => {
     b.put(MODEL, DIMS, 't4', vec(4));
     expect(b.canonicalSha256()).not.toBe(h1);
     b.close();
+  });
+
+  test('canonical hash VALUE is pinned: streaming rows (iterate) hashes exactly what the eager form did', () => {
+    // Literal computed on the pre-streaming implementation (`.all()` +
+    // readFileSync) over this exact fixture. The streaming rewrite must not
+    // move it: same ORDER BY key, same `key \0 dims \0 sha256(vector) \n`
+    // input, one row at a time.
+    const pinVec = (seed: number): number[] => [seed, seed / 2, -seed, 0.25 * seed];
+    const c = new EmbeddingCache(join(dir, 'pin.sqlite'));
+    c.open();
+    c.put(MODEL, DIMS, 't1', pinVec(1));
+    c.put(MODEL, DIMS, 't2', pinVec(2));
+    c.put(MODEL, DIMS, 't3', pinVec(3));
+    c.put(MODEL, DIMS, 'q1', pinVec(1), 'query');
+    expect(c.canonicalSha256()).toBe('4465dd82365a2ec400a62f8825ec1fa2a40325bbfed764ecd36e94fb8510ccd9');
+    // …and the documented formula recomputed independently agrees.
+    const rows = new Database(c.path)
+      .query<{ key: string; dims: number; vector: Uint8Array }, []>('SELECT key, dims, vector FROM embed_cache ORDER BY key')
+      .all();
+    expect(rows.length).toBe(4);
+    const h = createHash('sha256');
+    for (const r of rows) {
+      const vh = createHash('sha256').update(r.vector).digest('hex');
+      h.update(`${r.key}\0${r.dims}\0${vh}\n`);
+    }
+    expect(h.digest('hex')).toBe('4465dd82365a2ec400a62f8825ec1fa2a40325bbfed764ecd36e94fb8510ccd9');
+    // fileSha256 streams the file in chunks; it must equal a whole-file digest.
+    expect(c.fileSha256()).toBe(createHash('sha256').update(readFileSync(c.path)).digest('hex'));
+    c.close();
+  });
+
+  test('the module source carries no raw NUL bytes (the separators are the \\0 escape)', () => {
+    // A literal 0x00 inside a string literal made file(1) classify the module
+    // as data and `grep -I` skip it. Same hash input, escaped spelling.
+    const src = readFileSync(join(import.meta.dir, '..', 'src', 'eval', 'shared', 'embed-cache.ts'), 'utf-8');
+    expect(src.includes('\0')).toBe(false);
+    expect(src).toContain(".update('\\0')");
   });
 
   test('empty cache hashes deterministically; fileSha256 is a hex digest', () => {

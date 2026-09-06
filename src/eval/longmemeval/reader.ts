@@ -26,8 +26,11 @@
 import type { ThinkLLMClient } from '../../core/think/index.ts';
 import type { SearchResult } from '../../core/types.ts';
 import { renderChatBlock, type ChatSessionForPrompt } from './sanitize.ts';
-import { sessionIdFromSlug, type SlugToRawMap } from './metrics.ts';
+import { rawSessionId, type SlugToRawMap } from './metrics.ts';
 import { sha256Hex } from './run-config.ts';
+
+/** Re-exported for existing importers; the definition lives in metrics.ts (the SlugToRawMap owner). */
+export { rawSessionId } from './metrics.ts';
 
 export const READER_MAX_TOKENS = 512;
 /**
@@ -54,11 +57,6 @@ export const READER_SYSTEM_TEXT =
 
 /** sha256 of the system text — the receipt's reader-prompt pin. */
 export const READER_PROMPT_SHA = sha256Hex(READER_SYSTEM_TEXT);
-
-export function rawSessionId(slug: string, slugToRaw: SlugToRawMap): string {
-  const raws = slugToRaw.get(slug);
-  return raws && raws.length > 0 ? raws[0] : sessionIdFromSlug(slug);
-}
 
 /** --retrieval-only: a text block of retrieved sessions for downstream graders. */
 export function renderRetrievedAsHypothesis(results: readonly SearchResult[], slugToRaw: SlugToRawMap): string {

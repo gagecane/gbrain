@@ -469,7 +469,7 @@ describe('scripts/replay-autocut-floor.ts (CLI)', () => {
       writeFileSync(noGoldFile, noGold.map((r) => JSON.stringify(r)).join('\n') + '\n');
       const r5 = spawnSync('bun', ['run', 'scripts/replay-autocut-floor.ts', noGoldFile, '--floors', 'off,0.35'], { cwd: process.cwd(), encoding: 'utf-8' });
       expect(r5.status).toBe(1);
-      expect(r5.stderr).toContain('no capture row carries answer_session_ids');
+      expect(r5.stderr).toContain('2 of 2 capture row(s) carry no answer_session_ids');
 
       // --dataset joins the gold by question_id (JSON array, the LongMemEval shape) → same scores as the self-contained capture.
       const dsFile = join(dir, 'dataset.json');
@@ -485,6 +485,61 @@ describe('scripts/replay-autocut-floor.ts (CLI)', () => {
       const r7 = spawnSync('bun', ['run', 'scripts/replay-autocut-floor.ts', noGoldFile, '--dataset', dsFile, '--floors', 'off,0.35'], { cwd: process.cwd(), encoding: 'utf-8' });
       expect(r7.status).toBe(1);
       expect(r7.stderr).toContain('1 capture row(s) have no question in');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('gold join refuses MIXED gold-less captures, usage-errors on bad floors, and treats a non-array dataset gold as missing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-autocut-replay-'));
+    const run = (args: string[]) => spawnSync('bun', ['run', 'scripts/replay-autocut-floor.ts', ...args], { cwd: process.cwd(), encoding: 'utf-8' });
+    try {
+      const withGold = liveRow('q1', ['S0', 'S2'], 'temporal-reasoning');
+      const { answer_session_ids: _drop, ...noGoldQ2 } = liveRow('q2', ['S0', 'S4'], 'multi-session');
+      const mixedFile = join(dir, 'mixed.ndjson');
+      writeFileSync(mixedFile, [withGold, { ...noGoldQ2, gold_total: 2 }].map((r) => JSON.stringify(r)).join('\n') + '\n');
+
+      // (a) ONE gold-less row among gold-carrying rows, no --dataset: refused
+      // with the count — pre-fix only an all-gold-less capture was refused and
+      // the gold-less row silently scored as a miss at every floor.
+      const r1 = run([mixedFile, '--floors', 'off,0.35', '--json']);
+      expect(r1.status).toBe(1);
+      expect(r1.stderr).toContain('1 of 2 capture row(s) carry no answer_session_ids');
+      expect(r1.stderr).toContain('--dataset');
+      expect(r1.stdout).toBe('');
+
+      // (b) an invalid floor is a USAGE error (exit 2, the documented code),
+      // not an uncaught stack trace exiting 1.
+      const r2 = run([mixedFile, '--floors', 'off,1.5']);
+      expect(r2.status).toBe(2);
+      expect(r2.stderr).toContain("--floors: invalid autocut floor '1.5'");
+      expect(r2.stderr).toContain('usage:');
+      expect(r2.stderr).not.toContain('at parseFloors');
+      const r3 = run([mixedFile, '--floors', 'off,0.35', '--validate-live', 'abc']);
+      expect(r3.status).toBe(2);
+      expect(r3.stderr).toContain("--validate-live: invalid autocut floor 'abc'");
+
+      // (c) a dataset row whose answer_session_ids is missing / not an array
+      // is MISSING gold (exit 1, counted), never joined as [].
+      const dsFile = join(dir, 'dataset.json');
+      writeFileSync(dsFile, JSON.stringify([{ question_id: 'q1', answer_session_ids: ['S0', 'S2'] }, { question_id: 'q2', answer_session_ids: 'S0' }]));
+      const r4 = run([mixedFile, '--dataset', dsFile, '--floors', 'off,0.35', '--json']);
+      expect(r4.status).toBe(1);
+      expect(r4.stderr).toContain('1 capture row(s) match a question in');
+      expect(r4.stderr).toContain('answer_session_ids is missing or not a non-empty array');
+      expect(r4.stdout).toBe('');
+      writeFileSync(dsFile, JSON.stringify([{ question_id: 'q2', question_type: 'multi-session' }]));
+      const r5 = run([mixedFile, '--dataset', dsFile, '--floors', 'off,0.35']);
+      expect(r5.status).toBe(1);
+      expect(r5.stderr).toContain('1 capture row(s) match a question in');
+
+      // …and with a proper array the same mixed capture scores (the gold-carrying row is left alone).
+      writeFileSync(dsFile, JSON.stringify([{ question_id: 'q2', answer_session_ids: ['S0', 'S4'] }]));
+      const r6 = run([mixedFile, '--dataset', dsFile, '--floors', 'off,0.35', '--k', '5', '--json']);
+      expect(r6.status).toBe(0);
+      const out6 = JSON.parse(r6.stdout);
+      expect(out6.rows).toBe(2);
+      expect(out6.summaries[0].recall_all_hit).toBe(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

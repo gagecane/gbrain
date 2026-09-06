@@ -14,8 +14,7 @@
 
 import type { HybridSearchMeta, SearchResult } from '../../core/types.ts';
 import { estimateTokens } from '../../core/search/token-budget.ts';
-import { rawSessionId } from './reader.ts';
-import type { SlugToRawMap } from './metrics.ts';
+import { rawSessionId, type SlugToRawMap } from './metrics.ts';
 
 /** `slug#chunk_id` — the identity the autocut replay validates kept sets on. */
 export function poolKey(r: SearchResult): string {

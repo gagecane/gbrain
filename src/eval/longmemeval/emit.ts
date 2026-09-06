@@ -23,25 +23,15 @@ export interface JsonlEmitter {
   close(): void;
 }
 
-export interface EmitterOptions {
-  /**
-   * Rewrite-in-place mode: the emitter writes to `<outputPath>.rewrite.tmp`
-   * and renames it over `outputPath` on `close()`, so the original file is
-   * never truncated while the run is in flight. Required whenever the output
-   * path IS the resume file and the rows are re-emitted rather than appended
-   * (the --judge backfill path): a kill mid-backfill used to leave a 0-byte
-   * file and every paid reader row was lost. Ignored when `append` is true.
-   */
-  atomicRewrite?: boolean;
-}
-
 /**
  * `outputPath` undefined → stdout (stays open). Append mode is used by
- * --resume-from when the output path is the resume file; truncating would
- * erase the already-answered questions. When the rows are rewritten instead
- * (judge backfill), pass `atomicRewrite` — see EmitterOptions.
+ * --resume-from when the output path IS the resume file (truncating would
+ * erase the already-answered, paid rows): every new / judged / retried row is
+ * appended as it lands and the file is compacted to one row per question_id
+ * at run end (`compactJsonlByQuestionId`). A resume into a DIFFERENT output
+ * path is a fresh file, so truncate mode is safe there.
  */
-export function makeEmitter(outputPath?: string, append: boolean = false, options: EmitterOptions = {}): JsonlEmitter {
+export function makeEmitter(outputPath?: string, append: boolean = false): JsonlEmitter {
   if (!outputPath) {
     return {
       emit(obj) {
@@ -52,9 +42,7 @@ export function makeEmitter(outputPath?: string, append: boolean = false, option
       close() { /* stdout stays open */ },
     };
   }
-  const atomic = options.atomicRewrite === true && !append;
-  const writePath = atomic ? `${outputPath}.rewrite.tmp` : outputPath;
-  const fd = openSync(writePath, append ? 'a' : 'w');
+  const fd = openSync(outputPath, append ? 'a' : 'w');
   let closed = false;
   return {
     emit(obj) {
@@ -66,8 +54,6 @@ export function makeEmitter(outputPath?: string, append: boolean = false, option
       if (closed) return;
       closed = true;
       closeSync(fd);
-      // Atomic on POSIX: readers see either the old file or the complete new one.
-      if (atomic) renameSync(writePath, outputPath);
     },
   };
 }
@@ -111,7 +97,12 @@ export function compactJsonlByQuestionId(outputPath: string): { rows: number; su
   return { rows: order.length, superseded, summaries_dropped: summaries };
 }
 
-/** Emit the by_type_summary as the final line (replacing any prior summary line) with its glossary block. */
+/**
+ * Emit the by_type_summary as the final line (replacing any prior summary
+ * line) with its glossary block. The file rewrite is atomic
+ * (`<path>.summary.tmp` + rename, like `compactJsonlByQuestionId`): a kill
+ * mid-write leaves the paid rows intact instead of a truncated file.
+ */
 export function emitByTypeSummary(outputPath: string | undefined, summary: ByTypeSummaryV2): void {
   const keys = [`recall_all@${summary.k}`, `recall_any@${summary.k}`, ...(summary.qa_accuracy ? ['qa_accuracy'] : [])];
   const withMeta = { ...summary, _meta: { metric_glossary: buildMetricGlossaryMeta(keys) } };
@@ -135,5 +126,7 @@ export function emitByTypeSummary(outputPath: string | undefined, summary: ByTyp
     kept.push(line);
   }
   kept.push(json);
-  writeFileSync(outputPath, kept.join('\n') + '\n', 'utf8');
+  const tmp = `${outputPath}.summary.tmp`;
+  writeFileSync(tmp, kept.join('\n') + '\n', 'utf8');
+  renameSync(tmp, outputPath);
 }

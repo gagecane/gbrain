@@ -6,9 +6,12 @@
  * INVARIANT: recall is RECOMPUTED, never trusted. On resume every row's
  * recall_all/any is re-derived from its `retrieved[]` (top-k chunk rows →
  * distinct RAW session ids) or, for older rows, `retrieved_session_ids`,
- * joined against the dataset's gold — so a file written before the raw-id
- * join fix (sanitized ids) simply scores false instead of poisoning the
- * summary, and there is no legacy any-only counter (plan 0g).
+ * joined against the dataset's gold. A pre-stamp row whose ids are slug-tail
+ * normalized (lowercased, `_`/`.` → `-`) is mapped back to the RAW haystack id
+ * through `SeedContext.haystackByQid` when the harness supplies it (the
+ * dataset is loaded on resume); without that map such a row scores false
+ * instead of poisoning the summary. There is no legacy any-only counter
+ * (plan 0g).
  *
  * INVARIANT: pure given its inputs (file reads are the only I/O; no engine).
  */
@@ -18,6 +21,7 @@ import {
   addRowToBucket,
   isAbstentionQuestion,
   newBucket,
+  normalizeSessionId,
   scoreRecall,
   type RecallBucket,
 } from './metrics.ts';
@@ -132,6 +136,37 @@ export interface SeedContext {
   goldByQid: ReadonlyMap<string, readonly string[]>;
   k: number;
   includeAbstention: boolean;
+  /**
+   * question_id → RAW haystack session ids. When present, a retrieved id that
+   * is not a raw id but equals the slug-normalized form of exactly one raw id
+   * is scored as that raw id (legacy pre-stamp rows carried normalized ids).
+   */
+  haystackByQid?: ReadonlyMap<string, readonly string[]>;
+}
+
+/**
+ * Map legacy normalized ids back to RAW haystack ids. An id already present in
+ * the haystack passes through; otherwise the unique raw id whose normalized
+ * form equals it is used; an ambiguous (colliding) or unknown id is kept as-is
+ * (and so scores as a miss, never as a false hit).
+ */
+export function rawifyRetrievedIds(ids: readonly string[], haystack: readonly string[] | undefined): string[] {
+  if (!haystack || haystack.length === 0) return [...ids];
+  const raw = new Set(haystack);
+  const byNormalized = new Map<string, string[]>();
+  for (const h of haystack) {
+    const n = normalizeSessionId(h);
+    const list = byNormalized.get(n);
+    if (list) { if (!list.includes(h)) list.push(h); } else byNormalized.set(n, [h]);
+  }
+  const out: string[] = [];
+  for (const id of ids) {
+    if (raw.has(id)) { if (!out.includes(id)) out.push(id); continue; }
+    const cands = byNormalized.get(id);
+    const mapped = cands && cands.length === 1 ? cands[0] : id;
+    if (!out.includes(mapped)) out.push(mapped);
+  }
+  return out;
 }
 
 export interface SeedResult {
@@ -175,7 +210,7 @@ export function seedBucketsFromRows(
     const abstention = isAbstentionQuestion(qid) || row.abstention === true;
     if (abstention && !ctx.includeAbstention) { res.excludedAbstention++; continue; }
     if (gold.length === 0) { res.skipped++; continue; }
-    const score = scoreRecall(retrievedIdsAtK(row, ctx.k), gold, ctx.k);
+    const score = scoreRecall(rawifyRetrievedIds(retrievedIdsAtK(row, ctx.k), ctx.haystackByQid?.get(qid)), gold, ctx.k);
     const bucket = buckets[row.question_type] ?? (buckets[row.question_type] = newBucket());
     addRowToBucket(bucket, { recall_all_hit: score.recall_all_hit, recall_any_hit: score.recall_any_hit });
     res.seeded++;
@@ -222,12 +257,13 @@ export function loadResumeSet(resumePath: string): Set<string> {
 export function seedRecallByTypeFromFile(
   outputPath: string,
   buckets: Record<string, RecallBucket>,
-  ctx: { goldByQid: ReadonlyMap<string, readonly string[]>; k: number; includeAbstention?: boolean },
+  ctx: { goldByQid: ReadonlyMap<string, readonly string[]>; k: number; includeAbstention?: boolean; haystackByQid?: ReadonlyMap<string, readonly string[]> },
 ): SeedResult {
   return seedBucketsFromRows(readJsonlRows(outputPath), buckets, {
     goldByQid: ctx.goldByQid,
     k: ctx.k,
     includeAbstention: ctx.includeAbstention ?? false,
+    ...(ctx.haystackByQid ? { haystackByQid: ctx.haystackByQid } : {}),
   });
 }
 

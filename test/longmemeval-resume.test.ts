@@ -7,12 +7,16 @@
  *     `run_config.gold_missing_from_haystack` / `slug_collisions` are
  *     identical for a fresh run and a resume of the same file; only
  *     SCORED rows feed the buckets.
+ *   - legacy (pre-stamp) rows carry slug-normalized ids (lowercased, `_`/`.`
+ *     → `-`); with `haystackByQid` they are mapped back to the RAW id and
+ *     re-score as hits; without it (or on an ambiguous collision) they stay
+ *     misses — never false hits.
  */
 import { describe, test, expect } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { seedBucketsFromRows, readJsonlRows, loadResumeSet } from '../src/eval/longmemeval/resume.ts';
+import { seedBucketsFromRows, readJsonlRows, loadResumeSet, rawifyRetrievedIds } from '../src/eval/longmemeval/resume.ts';
 import type { RecallBucket } from '../src/eval/longmemeval/metrics.ts';
 
 describe('seedBucketsFromRows — gold_missing / slug_collisions row set', () => {
@@ -89,5 +93,55 @@ describe('appended resume files: last row per question_id wins', () => {
       const done = loadResumeSet(p);
       expect([...done].sort()).toEqual(['q1']);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('legacy normalized ids re-score against RAW gold through haystackByQid', () => {
+  const goldByQid = new Map<string, readonly string[]>([
+    ['mc-1', ['sharegpt_yywfIrx_0']],
+    ['mc-2', ['Sess_MULTI_a', 'Sess_MULTI_b']],
+    ['col', ['alpha_b']],
+  ]);
+  const haystackByQid = new Map<string, readonly string[]>([
+    ['mc-1', ['sharegpt_yywfIrx_0', 'sharegpt_AbC_1', 'sharegpt_Qz.9_2']],
+    ['mc-2', ['Sess_MULTI_a', 'Sess_MULTI_b', 'Sess_DECOY_c']],
+    ['col', ['alpha_b', 'alpha-b', 'Other_1']], // alpha_b and alpha-b collide on the slug
+  ]);
+  const legacyRows = [
+    { question_id: 'mc-1', question_type: 'single-session-user', hypothesis: 'h', retrieved_session_ids: ['sharegpt-yywfirx-0', 'sharegpt-abc-1'] },
+    { question_id: 'mc-2', question_type: 'multi-session', hypothesis: 'h', retrieved_session_ids: ['sess-multi-a', 'sess-multi-b'] },
+  ];
+
+  test('rawifyRetrievedIds: raw ids pass through, normalized ids map to the unique raw id, collisions and unknowns stay as-is', () => {
+    expect(rawifyRetrievedIds(['sharegpt-yywfirx-0', 'sharegpt_AbC_1', 'unknown-x'], haystackByQid.get('mc-1'))).toEqual(['sharegpt_yywfIrx_0', 'sharegpt_AbC_1', 'unknown-x']);
+    expect(rawifyRetrievedIds(['alpha-b', 'other-1'], haystackByQid.get('col'))).toEqual(['alpha-b', 'Other_1']);
+    // A raw AND its normalized twin collapse to one distinct session.
+    expect(rawifyRetrievedIds(['sharegpt_yywfIrx_0', 'sharegpt-yywfirx-0'], haystackByQid.get('mc-1'))).toEqual(['sharegpt_yywfIrx_0']);
+    expect(rawifyRetrievedIds(['a', 'b'], undefined)).toEqual(['a', 'b']);
+  });
+
+  test('without the map every legacy row is a miss (pre-fix behavior, still never a false hit)', () => {
+    const buckets: Record<string, RecallBucket> = {};
+    seedBucketsFromRows(legacyRows, buckets, { goldByQid, k: 5, includeAbstention: false });
+    expect(buckets['single-session-user']).toMatchObject({ total: 1, all_hit: 0, any_hit: 0 });
+    expect(buckets['multi-session']).toMatchObject({ total: 1, all_hit: 0, any_hit: 0 });
+  });
+
+  test('with the map the legacy rows re-score as hits', () => {
+    const buckets: Record<string, RecallBucket> = {};
+    const res = seedBucketsFromRows(legacyRows, buckets, { goldByQid, haystackByQid, k: 5, includeAbstention: false });
+    expect(res.seeded).toBe(2);
+    expect(buckets['single-session-user']).toMatchObject({ total: 1, all_hit: 1, any_hit: 1 });
+    expect(buckets['multi-session']).toMatchObject({ total: 1, all_hit: 1, any_hit: 1 });
+    expect(res.distinct).toEqual([2, 2]);
+  });
+
+  test('an ambiguous (colliding) normalized id is not resolved to gold', () => {
+    const buckets: Record<string, RecallBucket> = {};
+    seedBucketsFromRows(
+      [{ question_id: 'col', question_type: 'single-session-user', hypothesis: 'h', retrieved_session_ids: ['alpha-b'] }],
+      buckets, { goldByQid, haystackByQid, k: 5, includeAbstention: false },
+    );
+    expect(buckets['single-session-user']).toMatchObject({ total: 1, all_hit: 0, any_hit: 0 });
   });
 });

@@ -27,8 +27,10 @@ import {
   addRowToBucket,
   buildByTypeSummaryV2,
   buildRow,
+  rawSessionId,
   type RecallBucket,
 } from '../src/eval/longmemeval/metrics.ts';
+import { rawSessionId as readerRawSessionId } from '../src/eval/longmemeval/reader.ts';
 
 const FIXTURE = join(import.meta.dir, 'fixtures', 'longmemeval-mixedcase.jsonl');
 
@@ -101,6 +103,18 @@ describe('normalizeSessionId / sessionIdFromSlug / isAbstentionQuestion', () => 
     expect(isAbstentionQuestion('mc-3_absent')).toBe(false);
     expect(isAbstentionQuestion('abs_mc-3')).toBe(false);
     expect(isAbstentionQuestion('')).toBe(false);
+  });
+});
+
+describe('rawSessionId — the ONE slug→raw resolver', () => {
+  test('mapped slug → first raw id in haystack order; unmapped slug (or no map) → normalized tail; reader.ts re-exports the same function', () => {
+    const map = buildSlugToRawMap(sQuestion('q', ['Sess_A', 'sess-a', 'Other_1'], []));
+    expect(rawSessionId('chat/sess-a', map)).toBe('Sess_A');
+    expect(rawSessionId('chat/other-1', map)).toBe('Other_1');
+    expect(rawSessionId('chat/unmapped-9', map)).toBe('unmapped-9');
+    expect(rawSessionId('chat/unmapped-9')).toBe('unmapped-9');
+    expect(rawSessionId('notes/x')).toBe('x');
+    expect(readerRawSessionId).toBe(rawSessionId);
   });
 });
 

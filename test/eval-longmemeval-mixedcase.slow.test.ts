@@ -20,7 +20,14 @@
  *   - embed-cache transaction scope: a reader failure after import leaves the
  *     question's vectors committed (retry shows misses 0);
  *   - --capture-pool records EVERY pool row (rerank_score optional) + the
- *     autocut kept keys.
+ *     autocut kept keys;
+ *   - --search-pin: written to config BEFORE the explicit flags (an explicit
+ *     --reranker off beats search.reranker.enabled=true), folded into
+ *     retrieval_config_hash even for keys the mode resolver never parses, so
+ *     an unpinned file cannot be resumed under a pin;
+ *   - the reranker preflight + skipped-rows gate key on the RESOLVED pin
+ *     (bundle / snapshot / --search-pin), not the --reranker flag alone;
+ *   - legacy pre-stamp rows with slug-normalized ids re-score as hits.
  *
  * Hermetic: in-memory PGLite, keyword-only where possible, a deterministic
  * fake embed transport for the expansion path, stubbed readiness. No network.
@@ -528,38 +535,161 @@ describe('silent vector-arm / expansion degradation is a gate (mirrors --reranke
   }, 120_000);
 });
 
-describe('--reranker on preflight', () => {
-  test('a not-ready reranker exits 2 with the fix text before any question runs', async () => {
+describe('reranker preflight keys on the RESOLVED pin', () => {
+  const NON_KW = [FIXTURE, '--retrieval-only', '--no-trajectory', '--by-type', '--top-k', '5'];
+  const notReady = async (_engine: PGLiteEngine, model: string) => ({ plane: 'config' as const, readiness: rerankerReadiness(model, {}) }); // no provider key → not ready
+
+  test('--reranker on + a not-ready reranker exits 2 with the fix text before any question runs', async () => {
     const out = join(tmp, 'preflight.jsonl');
-    const code = await runCapturingExit(
-      [FIXTURE, ...BASE, '--reranker', 'on', '--output', out],
-      {
-        engine,
-        rerankerReadiness: async (_engine, model) => ({
-          plane: 'config',
-          readiness: rerankerReadiness(model, {}), // no provider key → not ready
-        }),
-      },
-    );
+    const code = await runCapturingExit([...NON_KW, '--reranker', 'on', '--output', out], { engine, rerankerReadiness: notReady });
     expect(code).toBe(2);
     expect(existsSync(out)).toBe(false);
   }, 60_000);
 
-  test('a ready reranker lets the run proceed (keyword-only path never reranks)', async () => {
-    const out = join(tmp, 'preflight-ok.jsonl');
+  test('NO --reranker flag: the balanced bundle turns the reranker on → the same preflight fires (exit 2); --reranker off skips it', async () => {
+    const out = join(tmp, 'preflight-bundle.jsonl');
+    let probes = 0;
+    const probe = async (e: PGLiteEngine, model: string) => { probes++; return notReady(e, model); };
+    const code = await runCapturingExit([...NON_KW, '--mode', 'balanced', '--output', out], { engine, rerankerReadiness: probe });
+    expect(code).toBe(2);
+    expect(probes).toBe(1);
+    expect(existsSync(out)).toBe(false);
+    // A --search-pin turning it on is a resolved pin too.
+    const viaPin = await runCapturingExit([...NON_KW, '--mode', 'conservative', '--search-pin', 'search.reranker.enabled=true', '--output', out], { engine, rerankerReadiness: probe });
+    expect(viaPin).toBe(2);
+    expect(probes).toBe(2);
+    // The explicit flag beats the bundle: no probe, and the run proceeds past the preflight
+    // (keyword-only here so no embed transport is needed).
+    const off = await runCapturingExit([FIXTURE, ...BASE, '--limit', '1', '--mode', 'balanced', '--output', out], { engine, rerankerReadiness: probe });
+    expect(off).toBeNull();
+    expect(probes).toBe(2);
+  }, 60_000);
+
+  test('--keyword-only resolves the reranker pin OFF: --reranker on never probes and the run proceeds', async () => {
+    const out = join(tmp, 'preflight-kw.jsonl');
+    let probes = 0;
     const code = await runCapturingExit(
       [FIXTURE, ...BASE, '--limit', '1', '--reranker', 'on', '--output', out],
-      {
-        engine,
-        rerankerReadiness: async (_engine, model) => ({
-          plane: 'config',
-          readiness: { ...rerankerReadiness(model, {}), keyPresent: true, ready: true },
-        }),
-      },
+      { engine, rerankerReadiness: async (e, model) => { probes++; return notReady(e, model); } },
     );
     expect(code).toBeNull();
-    expect(await engine.getConfig('search.reranker.enabled')).toBe('true');
+    expect(probes).toBe(0);
+    expect(await engine.getConfig('search.reranker.enabled')).toBe('true'); // the pin is still written
+    const { rows, summary } = splitRows(out);
+    expect(rows).toHaveLength(1);
+    expect(summary.run_config.reranker.enabled).toBe(false);
+  }, 60_000);
+});
+
+describe('reranker skipped-rows gate keys on the RESOLVED pin (no --reranker flag)', () => {
+  const priorDegraded = (out: string) => writeFileSync(out, readRows(FIXTURE).map(q => JSON.stringify({
+    question_id: q.question_id, question: q.question, question_type: q.question_type, hypothesis: 'done',
+    retrieved_session_ids: q.answer_session_ids ?? [],
+    search_meta: { vector_enabled: true, expansion_applied: false, degraded: [{ stage: 'reranker_skipped', reason: 'no_key' }], reranked: false },
+  })).join('\n') + '\n', 'utf8');
+  const NON_KW = [FIXTURE, '--retrieval-only', '--no-trajectory', '--by-type', '--top-k', '5'];
+
+  test('snapshot-enabled reranker + prior un-reranked rows → exit 1 naming the fix; balanced bundle default → exit 1; --reranker off → exit 0', async () => {
+    const out = join(tmp, 'gate-resolved.jsonl');
+    priorDegraded(out);
+    const viaSnapshot = await runCapturingExit([...NON_KW, '--mode', 'conservative', '--output', out, '--resume-from', out], { engine, searchConfigSnapshot: { 'search.reranker.enabled': 'true' } });
+    expect(viaSnapshot).toBe(1);
+    let summary = splitRows(out).summary;
+    expect(summary.run_config.reranker.enabled).toBe(true);
+    expect(summary.run_config.reranker_skipped_rows).toBe(3);
+
+    priorDegraded(out);
+    const viaBundle = await runCapturingExit([...NON_KW, '--mode', 'balanced', '--output', out, '--resume-from', out], { engine });
+    expect(viaBundle).toBe(1);
+
+    priorDegraded(out);
+    const off = await runCapturingExit([...NON_KW, '--mode', 'balanced', '--reranker', 'off', '--output', out, '--resume-from', out], { engine });
+    expect(off).toBeNull();
+    summary = splitRows(out).summary;
+    expect(summary.run_config.reranker.enabled).toBe(false);
+    expect(summary.run_config.reranker_skipped_rows).toBe(3); // still counted, no longer a gate
+  }, 60_000);
+});
+
+describe('--search-pin (generic search.* pins)', () => {
+  test('pin lands in config; knobs_hash + retrieval_config_hash re-key; an unpinned file is refused on resume; an UNPARSED key still re-keys retrieval_config_hash', async () => {
+    const out = join(tmp, 'pin-base.jsonl');
+    await runEvalLongMemEval([FIXTURE, ...BASE, '--limit', '1', '--reranker', 'off', '--autocut', 'off', '--output', out], { engine });
+    const base = splitRows(out).summary.run_config;
+    expect(base.search_pins).toBeUndefined();
+    expect(splitRows(out).rows[0].retrieval_config_hash).toBe(base.retrieval_config_hash);
+
+    // A key the mode resolver parses (autocut_jump) reaches knobs_hash AND retrieval_config_hash.
+    const parsed = join(tmp, 'pin-parsed.jsonl');
+    await runEvalLongMemEval([FIXTURE, ...BASE, '--limit', '1', '--reranker', 'off', '--autocut', 'off', '--search-pin', 'search.autocut_jump=0.5', '--output', parsed], { engine });
+    expect(await engine.getConfig('search.autocut_jump')).toBe('0.5');
+    const rcParsed = splitRows(parsed).summary.run_config;
+    expect(rcParsed.search_pins).toEqual({ 'search.autocut_jump': '0.5' });
+    expect(rcParsed.knobs_hash).not.toBe(base.knobs_hash);
+    expect(rcParsed.retrieval_config_hash).not.toBe(base.retrieval_config_hash);
+
+    // A key the resolver does NOT parse changes ranking but never reaches
+    // knobs_hash — retrieval_config_hash must still differ (pre-fix it did not).
+    const unparsed = join(tmp, 'pin-unparsed.jsonl');
+    await runEvalLongMemEval([FIXTURE, ...BASE, '--limit', '1', '--reranker', 'off', '--autocut', 'off', '--search-pin', 'search.adaptive_return=true', '--output', unparsed], { engine });
+    expect(await engine.getConfig('search.adaptive_return')).toBe('true');
+    const rcUnparsed = splitRows(unparsed).summary.run_config;
+    expect(rcUnparsed.search_pins).toEqual({ 'search.adaptive_return': 'true' });
+    expect(rcUnparsed.knobs_hash).toBe(base.knobs_hash);
+    expect(rcUnparsed.retrieval_config_hash).not.toBe(base.retrieval_config_hash);
+    expect(rcUnparsed.retrieval_config_hash).not.toBe(rcParsed.retrieval_config_hash);
+
+    // Resuming the UNPINNED file under the unparsed pin is refused (different hash); a same-pin resume proceeds.
+    const refused = await runCapturingExit([FIXTURE, ...BASE, '--reranker', 'off', '--autocut', 'off', '--search-pin', 'search.adaptive_return=true', '--output', out, '--resume-from', out], { engine });
+    expect(refused).toBe(1);
     expect(splitRows(out).rows).toHaveLength(1);
+    await runEvalLongMemEval([FIXTURE, ...BASE, '--reranker', 'off', '--autocut', 'off', '--search-pin', 'search.adaptive_return=true', '--output', unparsed, '--resume-from', unparsed], { engine });
+    expect(splitRows(unparsed).rows).toHaveLength(3);
+    expect(splitRows(unparsed).summary.run_config.search_pins).toEqual({ 'search.adaptive_return': 'true' });
+  }, 120_000);
+
+  test('an explicit --reranker off / --autocut on beats a --search-pin of the same key: config, resolved pins and the row agree', async () => {
+    configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, env: { OPENAI_API_KEY: 'sk-fake' } });
+    installFakeEmbedTransport();
+    const out = join(tmp, 'pin-beats.jsonl');
+    let probes = 0;
+    const code = await runCapturingExit(
+      [FIXTURE, '--retrieval-only', '--no-trajectory', '--by-type', '--top-k', '5', '--mode', 'balanced', '--no-embed-cache', '--limit', '1', '--output', out,
+        '--reranker', 'off', '--autocut', 'on',
+        '--search-pin', 'search.reranker.enabled=true', '--search-pin', 'search.autocut=false'],
+      { engine, rerankerReadiness: async (_e, model) => { probes++; return { plane: 'config' as const, readiness: rerankerReadiness(model, {}) }; } },
+    );
+    expect(code).toBeNull();
+    expect(probes).toBe(0); // resolved pin is OFF → no preflight, no gate
+    // The explicit flags were written LAST, so they are what hybridSearch resolved.
+    expect(await engine.getConfig('search.reranker.enabled')).toBe('false');
+    expect(await engine.getConfig('search.autocut')).toBe('true');
+    const { rows, summary } = splitRows(out);
+    expect(summary.run_config.reranker.enabled).toBe(false);
+    expect(summary.run_config.autocut).toBe(true);
+    expect(summary.run_config.search_pins).toEqual({ 'search.autocut': 'false', 'search.reranker.enabled': 'true' });
+    expect(rows[0].search_meta.reranked).toBe(false);
+    expect(rows[0].search_meta.degraded.map((d: any) => d.stage)).not.toContain('reranker_skipped');
+    expect(rows[0].search_meta.vector_enabled).toBe(true);
+  }, 120_000);
+});
+
+describe('legacy pre-stamp rows with slug-normalized ids re-score against RAW gold on resume', () => {
+  test('a no-op resume of normalized-id rows scores mc-1 + mc-2 as hits (pre-fix: every legacy row was a miss)', async () => {
+    const out = join(tmp, 'legacy-ids.jsonl');
+    // Pre-v2 rows: no retrieval_config_hash, no retrieved[], ids lowercased with _ → -.
+    writeFileSync(out, readRows(FIXTURE).map(q => JSON.stringify({
+      question_id: q.question_id, question: q.question, question_type: q.question_type, hypothesis: 'done',
+      retrieved_session_ids: (q.answer_session_ids ?? []).map((id: string) => id.toLowerCase().replace(/[_.]/g, '-')),
+    })).join('\n') + '\n', 'utf8');
+    expect(readRows(out)[0].retrieved_session_ids).toEqual(['sharegpt-yywfirx-0']);
+    const code = await runCapturingExit([FIXTURE, ...BASE, '--output', out, '--resume-from', out], { engine });
+    expect(code).toBeNull();
+    const { rows, summary } = splitRows(out);
+    expect(rows).toHaveLength(3); // nothing re-run
+    expect(summary.aggregate).toMatchObject({ total: 2, all_hit: 2, any_hit: 2 });
+    expect(summary.recall_by_type['multi-session']).toMatchObject({ total: 1, all_hit: 1 });
+    expect(summary.excluded_abstention).toBe(1);
   }, 60_000);
 });
 
@@ -638,7 +768,9 @@ describe('expansion: record → replay → replay miss', () => {
     const pagesBefore = (await engine.executeRaw<{ n: number }>('SELECT COUNT(*)::int AS n FROM pages'))[0].n;
     const out = join(tmp, 'replay-miss-early.jsonl');
     const code = await runCapturingExit(
-      [FIXTURE, '--retrieval-only', '--no-trajectory', '--by-type', '--top-k', '5', '--no-embed-cache', '--expansion-replay', foreign, '--question-ids', writeIds('miss-ids.txt', ['mc-1']), '--output', out],
+      // --reranker off: the balanced bundle turns the reranker ON, and the resolved-pin
+      // preflight would otherwise exit 2 (no key) before the replay-miss path is reached.
+      [FIXTURE, '--retrieval-only', '--no-trajectory', '--by-type', '--top-k', '5', '--reranker', 'off', '--no-embed-cache', '--expansion-replay', foreign, '--question-ids', writeIds('miss-ids.txt', ['mc-1']), '--output', out],
       { engine, expandFn: async () => { throw new Error('expandFn must not run on replay'); } },
     );
     expect(code).toBe(1);
@@ -661,7 +793,9 @@ describe('expansion: record → replay → replay miss', () => {
     // Run 1: the reader (answer LLM) throws AFTER import + search.
     const failingClient: ThinkLLMClient = { create: async () => { throw new Error('reader boom (simulated)'); } };
     const out1 = join(tmp, 'tx-scope-1.jsonl');
-    await runEvalLongMemEval([...common, '--output', out1], { engine, client: failingClient, embedTransport: fake.fn });
+    // The only question errors → an all-errored run exits 1 (the loop still ran; that is what we probe).
+    const failedCode = await runCapturingExit([...common, '--output', out1], { engine, client: failingClient, embedTransport: fake.fn });
+    expect(failedCode).toBe(1);
     const run1 = splitRows(out1);
     expect(byId(run1.rows)['mc-1'].error).toContain('reader boom');
     expect(run1.summary.run_config.errors).toBe(1);

@@ -45,6 +45,11 @@
  *   --autocut / --relational-pin / --search-pin
  *                  config overlays applied to BOTH arms on top of ARM_PINS, so
  *                  the operator can run the pair in the exact shipped shape.
+ *                  Precedence (buildOverlay): ARM_PINS < --search-pin < the
+ *                  explicit --autocut / --relational-pin flags — a generic
+ *                  `--search-pin search.autocut=false` never silently overrides
+ *                  an explicit `--autocut on` (the named flag is the more
+ *                  specific statement of intent).
  *                  `search.reranker.*` is RESERVED and refused (exit 2): the
  *                  reranker is the arm axis — an overlay there would either run
  *                  the ON arm on a model other than the one whose readiness was
@@ -554,6 +559,20 @@ export function parseArgs(argv: string[]): Args {
   return a;
 }
 
+/**
+ * The config overlay both arms receive on top of ARM_PINS. Generic
+ * `--search-pin` entries are spread FIRST so the explicit `--autocut` /
+ * `--relational-pin` flags win: an operator who typed `--autocut on` meant it,
+ * even if a pasted pin list also carries `search.autocut=false`.
+ */
+export function buildOverlay(args: Pick<Args, 'autocut' | 'relationalPin' | 'searchPins'>): Readonly<Record<string, string>> {
+  return {
+    ...(args.searchPins ?? {}),
+    ...(args.autocut === 'on' ? { 'search.autocut': 'true' } : args.autocut === 'off' ? { 'search.autocut': 'false' } : {}),
+    ...(args.relationalPin !== undefined ? { 'search.relational_rerank_pin': args.relationalPin } : {}),
+  };
+}
+
 /** Mirror of cli.ts's `eval longmemeval` bootstrap: config file when present, env otherwise. */
 function configureGatewayFromEnv(): void {
   const config =
@@ -631,12 +650,7 @@ async function main(): Promise<void> {
     const queryChars = questions.reduce((s, q) => s + q.query.length, 0);
 
     // OFF arm.
-    const overlay: Readonly<Record<string, string>> =
-      {
-        ...(args.autocut === 'on' ? { 'search.autocut': 'true' } : args.autocut === 'off' ? { 'search.autocut': 'false' } : {}),
-        ...(args.relationalPin !== undefined ? { 'search.relational_rerank_pin': args.relationalPin } : {}),
-        ...(args.searchPins ?? {}),
-      };
+    const overlay = buildOverlay(args);
     await applyArmPins(engine, 'off', overlay);
     const off = await runArm(engine, 'off', questions, { limit: args.limit });
     if (!args.stubEmbed) embeddedChars += queryChars;

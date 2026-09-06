@@ -11,8 +11,10 @@
  * dispatch markers — `case 'X':` labels AND every `if (command === 'X' …)`
  * head, plain or compound (see segmentDispatchBlocks) — collect every
  * `import('./commands/Y.ts')` inside each block, then scan the
- * case-block text plus each imported module (plus one level of that module's
- * ./relative same-directory imports) for `--flag` string literals — including
+ * case-block text (with `//` and `/* *\/` comments stripped — prose next to a
+ * marker is not consumption; see stripComments) plus each imported module
+ * (plus one level of that module's ./relative same-directory imports) for
+ * `--flag` string literals — including
  * help text, which deliberately over-includes: accepting a flag the handler
  * ignores is the pre-#2185 status quo for that flag, while missing a real
  * flag would break working invocations on upgrade.
@@ -191,6 +193,54 @@ export function isValueOnlyImport(block: string, importIndex: number): boolean {
  * a non-`if` expression (the serve `degradable` const) is deliberately NOT a
  * marker.
  */
+/**
+ * Strip `//` line comments and `/* … *\/` block comments from a block's
+ * text, preserving newlines (so line-anchored scans such as isValueOnlyImport
+ * still see the same line structure) and leaving string / template literals
+ * intact (a `'https://…'` literal is not a comment). Prose in a comment is not
+ * evidence a command reads a flag: cli.ts's `reindex --help` comment ("…the
+ * --multimodal flags the dispatcher parses") handed the PRECEDING marker
+ * (storage) a phantom --multimodal because the comment sat between the two
+ * markers. Regex literals are not modelled — `//` inside one would truncate
+ * that line — which is acceptable for dispatch-block text (none there today).
+ */
+export function stripComments(src: string): string {
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (c === '/' && next === '/') {
+      while (i < n && src[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      const end = src.indexOf('*/', i + 2);
+      const stop = end < 0 ? n : end + 2;
+      // Keep the newlines the comment spanned so line structure survives.
+      out += src.slice(i, stop).replace(/[^\n]/g, '');
+      i = stop;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      let j = i + 1;
+      while (j < n && src[j] !== quote) {
+        if (src[j] === '\\') j++;
+        else if (quote !== '`' && src[j] === '\n') break; // unterminated: stop at EOL
+        j++;
+      }
+      out += src.slice(i, Math.min(n, j + 1));
+      i = j + 1;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
 export function segmentDispatchBlocks(fnSrc: string): Map<string, string> {
   const markRe = /(?:^[ \t]*if \(\s*command === '([a-z0-9-]+)'|^      case '([a-z0-9-]+)':)/gm;
   const marks: Array<{ label: string; start: number }> = [];
@@ -202,7 +252,8 @@ export function segmentDispatchBlocks(fnSrc: string): Map<string, string> {
   const blocks = new Map<string, string>();
   for (let i = 0; i < marks.length; i++) {
     const end = i + 1 < marks.length ? marks[i + 1].start : fnSrc.length;
-    const body = fnSrc.slice(marks[i].start, end);
+    // Comments are prose, not consumption: strip them before any flag scan.
+    const body = stripComments(fnSrc.slice(marks[i].start, end));
     // Fall-through labels share the following block.
     blocks.set(marks[i].label, (blocks.get(marks[i].label) ?? '') + body);
   }

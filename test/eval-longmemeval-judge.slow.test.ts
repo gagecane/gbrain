@@ -18,7 +18,12 @@
  *     --allow-incomplete-judgments);
  *   - mixed judge_config_hash refused unless --allow-mixed-run-config;
  *   - no usable judge provider → exit 1 naming OPENAI_API_KEY;
- *   - backfill to a different --output copies the prior rows forward.
+ *   - backfill to a different --output copies the prior rows forward;
+ *   - a judge THROW on a live row (malformed provider result) stamps
+ *     judge_error:provider_error and KEEPS the paid reader row (never an
+ *     error row);
+ *   - a resume of a judged file WITHOUT --judge still rebuilds qa_accuracy
+ *     from the prior verdicts (anyRowJudged).
  */
 import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'fs';
@@ -494,4 +499,81 @@ describe('--judge publishability gate reads qa.complete (unjudged rows count)', 
     expect(warned.stderr).toContain('WARN --judge: judgments incomplete (judge_errors 0, skipped_budget 0, unjudged 1)');
     expect(splitRows(out).summary.qa_accuracy.complete).toBe(false);
   }, 120_000);
+});
+
+describe('inline judge throw keeps the paid reader row', () => {
+  test('a judge client that resolves with a malformed (undefined) result → judge_error provider_error on the row; hypothesis kept; no error row; exit 1', async () => {
+    const out = join(tmp, 'judge-throw.jsonl');
+    const reader = readerClient();
+    let calls = 0;
+    // judgeRow never throws for a transport failure (a thrown client error is a
+    // classified judge_error), so the throw is provoked by a malformed result:
+    // runJudge dereferences `res.usage` and TypeErrors out of judgeRow.
+    const badJudge: JudgeChatFn = async () => { calls++; return undefined as unknown as ChatResult; };
+    const { code, stderr } = await runCapturing([FIXTURE, ...BASE, ...JUDGE, '--output', out], { engine, client: reader.client, judgeClient: badJudge });
+    expect(code).toBe(1);
+    expect(calls).toBe(3);
+    expect(reader.calls).toHaveLength(3);
+    expect(stderr).toContain('FAIL --judge: judgments incomplete (judge_errors 3, skipped_budget 0, unjudged 0)');
+    expect(stderr).not.toContain('every question errored');
+    const { rows, summary } = splitRows(out);
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.error).toBeUndefined(); // NOT an error row
+      expect(row.hypothesis).toBe(ANSWERS[row.question_id]); // the paid reader row survives
+      expect(row.reader_model).toBe(READER_MODEL);
+      expect(row.judge_error).toBe('provider_error');
+      expect(row.judge_error_detail).toContain('undefined');
+      expect(row.judge_correct).toBeUndefined();
+      expect(row.judge_model).toBe('openai:gpt-4o');
+      expect(row.judge_prompt_version).toBe(JUDGE_PROMPT_VERSION);
+      expect(row.judge_config_hash).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(summary.run_config.errors).toBe(0);
+    expect(summary.qa_accuracy).toMatchObject({ judge_errors: 3, reader_errors: 0, judged: 0, complete: false });
+    expect(summary.qa_accuracy.judge_error_classes).toEqual({ provider_error: 3 });
+
+    // The rows are judgeable on a backfill: every one lacks a settled verdict.
+    const j = judgeClient({ 'mc-1': 'Yes', 'mc-2': 'Yes', 'mc-3_abs': 'Yes' });
+    const back = await runCapturing([FIXTURE, ...BASE, ...JUDGE, '--output', out, '--resume-from', out], { engine, client: readerClient({ forbid: true }).client, judgeClient: j.fn });
+    expect(back.code).toBeNull();
+    expect(j.calls).toHaveLength(3);
+    expect(splitRows(out).summary.qa_accuracy).toMatchObject({ judged: 3, correct: 3, judge_errors: 0, complete: true });
+  }, 120_000);
+});
+
+describe('resume of a judged file WITHOUT --judge', () => {
+  test('qa_accuracy is rebuilt from the prior verdicts (anyRowJudged) on a no-op resume AND a partial resume; no judge call; no publishability gate', async () => {
+    const out = join(tmp, 'judged-then-plain.jsonl');
+    const j = judgeClient({ 'mc-1': 'Yes', 'mc-2': 'No', 'mc-3_abs': 'Yes' });
+    const first = await runCapturing([FIXTURE, ...BASE, ...JUDGE, '--output', out], { engine, client: readerClient().client, judgeClient: j.fn });
+    expect(first.code).toBeNull();
+    expect(j.calls).toHaveLength(3);
+
+    // No-op resume, no --judge: the summary still carries qa_accuracy from the rows.
+    const noop = await runCapturing([FIXTURE, ...BASE, '--by-type', '--output', out, '--resume-from', out], { engine, client: readerClient({ forbid: true }).client });
+    expect(noop.code).toBeNull();
+    expect(noop.stderr).toContain('nothing to do');
+    expect(noop.stderr).toContain('qa_accuracy: headline 66.7% (2/3');
+    expect(noop.stderr).not.toContain('FAIL');
+    const qa1 = splitRows(out).summary.qa_accuracy;
+    expect(qa1).toMatchObject({ total_questions: 3, judged: 3, correct: 2, judge_errors: 0, complete: true });
+    expect(qa1.judge_config_hash).toBe(splitRows(out).rows[0].judge_config_hash);
+
+    // Partial resume, no --judge: mc-3_abs is re-answered (reader called, not
+    // judged) and qa_accuracy is rebuilt over judged + unjudged rows.
+    const kept = splitRows(out).rows.filter(r => r.question_id !== 'mc-3_abs');
+    writeFileSync(out, kept.map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    const reader = readerClient();
+    const partial = await runCapturing([FIXTURE, ...BASE, '--by-type', '--output', out, '--resume-from', out], { engine, client: reader.client });
+    expect(partial.code).toBeNull();
+    expect(reader.calls).toHaveLength(1);
+    const { rows, summary } = splitRows(out);
+    expect(rows.map(r => r.question_id).sort()).toEqual(['mc-1', 'mc-2', 'mc-3_abs']);
+    expect(byId(rows)['mc-3_abs'].judge_correct).toBeUndefined();
+    expect(byId(rows)['mc-1'].judge_correct).toBe(true);
+    expect(summary.qa_accuracy).toMatchObject({ total_questions: 3, judged: 2, correct: 1, unjudged: 1, complete: false });
+    // Without --judge an incomplete judgment set is reported, not gated.
+    expect(partial.stderr).not.toContain('FAIL --judge');
+  }, 180_000);
 });

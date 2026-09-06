@@ -1,7 +1,9 @@
 /**
- * emit.ts — the JSONL emitter's file modes. The atomic-rewrite mode is the
- * guard for the --judge --resume-from path: the resume file (paid reader
- * rows) must never be truncated while the backfill is in flight.
+ * emit.ts — the JSONL emitter's file modes (truncate / append), the atomic
+ * by_type_summary rewrite and the resume-file compaction. The same-file
+ * --resume-from path (judge backfill included) APPENDS and compacts, so the
+ * resume file (paid reader rows) is never truncated while a run is in flight;
+ * the summary writer and the compactor rename a temp file over the original.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -34,43 +36,47 @@ describe('makeEmitter', () => {
     expect(lines(p).map((r) => r.question_id)).toEqual(['old', 'new']);
   });
 
-  test('atomicRewrite: the original is untouched until close(), then replaced in one rename; the temp file is gone', () => {
-    const p = join(dir, 'run.ndjson');
-    writeFileSync(p, [{ question_id: 'q1', hypothesis: 'paid answer' }, { kind: 'by_type_summary' }].map((r) => JSON.stringify(r)).join('\n') + '\n');
-    const em = makeEmitter(p, false, { atomicRewrite: true });
-    // Mid-run (a kill here must lose nothing): the resume file still has the paid row.
-    expect(lines(p).map((r) => r.question_id ?? r.kind)).toEqual(['q1', 'by_type_summary']);
-    expect(existsSync(`${p}.rewrite.tmp`)).toBe(true);
-    em.emit({ question_id: 'q1', hypothesis: 'paid answer', judge_correct: true });
-    expect(lines(p)[0].judge_correct).toBeUndefined(); // still the old file
-    em.close();
-    expect(lines(p)).toEqual([{ question_id: 'q1', hypothesis: 'paid answer', judge_correct: true }]);
-    expect(existsSync(`${p}.rewrite.tmp`)).toBe(false);
-    em.close(); // idempotent
-  });
-
-  test('atomicRewrite is ignored in append mode (nothing to protect)', () => {
-    const p = join(dir, 'out.ndjson');
-    writeFileSync(p, JSON.stringify({ question_id: 'old' }) + '\n');
-    const em = makeEmitter(p, true, { atomicRewrite: true });
-    em.emit({ question_id: 'new' });
-    expect(existsSync(`${p}.rewrite.tmp`)).toBe(false);
-    em.close();
-    expect(lines(p).map((r) => r.question_id)).toEqual(['old', 'new']);
-  });
-
-  test('the summary writer runs against the renamed file (rewrite → summary order)', () => {
+  test('the summary writer replaces a stale summary line and lands as the final line', () => {
     const p = join(dir, 'run.ndjson');
     writeFileSync(p, JSON.stringify({ question_id: 'q1' }) + '\n' + JSON.stringify({ kind: 'by_type_summary', stale: true }) + '\n');
-    const em = makeEmitter(p, false, { atomicRewrite: true });
+    const em = makeEmitter(p, true);
     em.emit({ question_id: 'q1', judge_correct: false });
     em.close();
     emitByTypeSummary(p, { kind: 'by_type_summary', k: 5 } as never);
     const rows = lines(p);
-    expect(rows.length).toBe(2);
-    expect(rows[0]).toEqual({ question_id: 'q1', judge_correct: false });
-    expect(rows[1].kind).toBe('by_type_summary');
-    expect(rows[1].stale).toBeUndefined();
+    expect(rows.length).toBe(3);
+    expect(rows[0]).toEqual({ question_id: 'q1' });
+    expect(rows[1]).toEqual({ question_id: 'q1', judge_correct: false });
+    expect(rows[2].kind).toBe('by_type_summary');
+    expect(rows[2].stale).toBeUndefined();
+  });
+});
+
+describe('emitByTypeSummary is atomic', () => {
+  test('writes <path>.summary.tmp then renames: the temp file is gone and the content is complete', () => {
+    const p = join(dir, 'run.ndjson');
+    writeFileSync(p, [
+      JSON.stringify({ question_id: 'q1', hypothesis: 'paid answer' }),
+      JSON.stringify({ kind: 'by_type_summary', stale: true }),
+      '{"question_id":"q2","hypo', // corrupt tail is kept as-is (the resume loader skips it)
+    ].join('\n') + '\n');
+    emitByTypeSummary(p, { kind: 'by_type_summary', k: 5, recall_by_type: {} } as never);
+    expect(existsSync(`${p}.summary.tmp`)).toBe(false);
+    const raw = readFileSync(p, 'utf8').split('\n').filter(Boolean);
+    expect(raw).toHaveLength(3);
+    expect(JSON.parse(raw[0])).toEqual({ question_id: 'q1', hypothesis: 'paid answer' });
+    expect(raw[1]).toBe('{"question_id":"q2","hypo');
+    const summary = JSON.parse(raw[2]);
+    expect(summary.kind).toBe('by_type_summary');
+    expect(summary.stale).toBeUndefined();
+    expect(summary._meta.metric_glossary['recall_all@5']).toBeDefined();
+  });
+
+  test('a missing output file is created (no prior rows)', () => {
+    const p = join(dir, 'fresh.ndjson');
+    emitByTypeSummary(p, { kind: 'by_type_summary', k: 3 } as never);
+    expect(existsSync(`${p}.summary.tmp`)).toBe(false);
+    expect(lines(p).map((r) => r.kind)).toEqual(['by_type_summary']);
   });
 });
 

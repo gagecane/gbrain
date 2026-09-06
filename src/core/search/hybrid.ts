@@ -2191,10 +2191,10 @@ export async function hybridSearch(
   }
 
   // Phase E3 (Cat 13): metadata boost gate — decided from the SAME lexical
-  // lists composeFusionLists just fused (post relaxed-row demotion); stamped
-  // on meta even under `always` so vector-only-voter queries are countable.
+  // lists composeFusionLists just fused (post relaxed-row demotion); image
+  // modality never skips (no lexical arm ran); stamped on meta even under `always`.
   const metadataBoostGate = decideMetadataBoosts({
-    gate: resolvedMode.metadata_boost_gate,
+    gate: resolvedMode.metadata_boost_gate, modality: effectiveModality,
     lexicalVoted: lexicalArmsVoted({
       keywordFusionList, titleFusionList, relationalList, includeRelational: effectiveModality !== 'image',
     }),

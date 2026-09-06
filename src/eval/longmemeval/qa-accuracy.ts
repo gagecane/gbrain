@@ -16,13 +16,16 @@
  *     of the denominator.
  *   - `accuracy_470` = headline-style over the non-`_abs` questions (the
  *     retrieval-metric denominator), for the like-for-like reader.
- *   - `complete` = no judge_error, no skipped_budget, no unjudged row: the
- *     publishability bit the run-end gate reads.
+ *   - `complete` = no judge_error, no skipped_budget, no reader_error, no
+ *     unjudged row: the publishability bit the run-end gate reads (a
+ *     reader-error row scores incorrect without ever being judged, so a run
+ *     that carries one is not publishable either).
  *   - `ci95_bootstrap` = percentile bootstrap over the headline 0/1 vector,
  *     labelled question-sampling only (D8/D17).
  */
 
 import { bootstrapMeanCi, type BootstrapCi } from '../shared/bootstrap.ts';
+import { hasJudgeAttempt } from './judge-lane.ts';
 import { isAbstentionQuestion } from './metrics.ts';
 
 export interface QaRowLike {
@@ -199,7 +202,7 @@ export function buildQaAccuracy(rows: ReadonlyArray<QaRowLike>, opts: QaAccuracy
     abstention: { ...abs, accuracy_headline: abs.total === 0 ? null : abs.correct / abs.total },
     ci95_bootstrap: bootstrapMeanCi(headline, { seed: opts.seed, resamples: opts.resamples }),
     judge_error_classes: errorClasses,
-    complete: agg.judge_errors === 0 && agg.skipped_budget === 0 && agg.unjudged === 0,
+    complete: agg.judge_errors === 0 && agg.skipped_budget === 0 && agg.reader_errors === 0 && agg.unjudged === 0,
     judge_model: opts.judgeModel,
     judge_prompt_version: opts.judgePromptVersion,
     judge_config_hash: hashes.size === 1 ? onlyHash : opts.judgeConfigHash,
@@ -211,7 +214,7 @@ export function buildQaAccuracy(rows: ReadonlyArray<QaRowLike>, opts: QaAccuracy
   };
 }
 
-/** True when any row carries a judge attempt (verdict, error, or budget skip). */
+/** True when any question row carries a judge attempt (`hasJudgeAttempt`: verdict, error, or budget skip). */
 export function anyRowJudged(rows: ReadonlyArray<QaRowLike>): boolean {
-  return rows.some(r => isQuestionRow(r) && (typeof r.judge_correct === 'boolean' || typeof r.judge_error === 'string' || r.judge_skipped === 'budget'));
+  return rows.some(r => isQuestionRow(r) && hasJudgeAttempt(r));
 }

@@ -13,7 +13,8 @@
  *     --floors off,0.10,0.20,0.35,0.50,0.65,0.80 [--dataset <longmemeval json>] [--k 5] \
  *     [--validate-live 0.35] [--split-half seed42] [--jump 0.2] [--min-keep 1] [--json]
  *
- * Exit: 0 ok · 1 validate-live mismatch or bad input · 2 usage.
+ * Exit: 0 ok · 1 validate-live mismatch or bad input (incl. any question row
+ * without gold session ids) · 2 usage (incl. an invalid --floors / --validate-live value).
  */
 
 import { readFileSync } from 'node:fs';
@@ -74,7 +75,7 @@ function parseArgs(argv: string[]): Args {
       // Exactly ONE floor: the capture arm ran at a single floor, so a list
       // here can only mean the caller expected a sweep — refuse rather than
       // silently validating against the first entry.
-      const floors = parseFloors(need(i++, a));
+      const floors = floorsOrUsage(need(i++, a), a);
       if (floors.length !== 1) {
         process.stderr.write(`--validate-live takes exactly one floor (got ${floors.length}: ${argv[i]}); the sweep is --floors\n`);
         usage(2);
@@ -111,7 +112,17 @@ function parseArgs(argv: string[]): Args {
   }
   return {
     file,
-    dataset, floors: parseFloors(floorsSpec), k, validateLive: validate, splitSeed, knobs: { jumpRatio, minKeep }, json };
+    dataset, floors: floorsOrUsage(floorsSpec, '--floors'), k, validateLive: validate, splitSeed, knobs: { jumpRatio, minKeep }, json };
+}
+
+/** parseFloors, with an invalid spec reported as a usage error (exit 2) instead of an uncaught stack. */
+function floorsOrUsage(spec: string, flag: string): Floor[] {
+  try {
+    return parseFloors(spec);
+  } catch (err) {
+    process.stderr.write(`${flag}: ${(err as Error).message}\n`);
+    usage(2);
+  }
 }
 
 /** Every metric this script prints, as glossary keys (all carried by src/core/eval/metric-glossary.ts). */
@@ -144,8 +155,13 @@ function renderTable(title: string, summaries: FloorSummary[], out: string[]): v
   out.push('');
 }
 
-/** question_id → raw `answer_session_ids` from a LongMemEval dataset (JSON array or ndjson). */
-function loadGold(path: string): Map<string, string[]> {
+/**
+ * question_id → raw `answer_session_ids` from a LongMemEval dataset (JSON array
+ * or ndjson). A row whose `answer_session_ids` is missing or not an array maps
+ * to `null` — the join counts it as missing gold (exit 1), never as `[]`
+ * (which would score every floor as a miss for that question).
+ */
+function loadGold(path: string): Map<string, string[] | null> {
   let raw: string;
   try {
     raw = readFileSync(path, 'utf-8');
@@ -155,11 +171,11 @@ function loadGold(path: string): Map<string, string[]> {
   const items: unknown[] = raw.trimStart().startsWith('[')
     ? (JSON.parse(raw) as unknown[])
     : raw.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as unknown);
-  const out = new Map<string, string[]>();
+  const out = new Map<string, string[] | null>();
   for (const it of items) {
     const o = it as { question_id?: unknown; answer_session_ids?: unknown };
     if (typeof o.question_id !== 'string') continue;
-    out.set(o.question_id, Array.isArray(o.answer_session_ids) ? (o.answer_session_ids as string[]) : []);
+    out.set(o.question_id, Array.isArray(o.answer_session_ids) ? (o.answer_session_ids as string[]) : null);
   }
   if (out.size === 0) throw new Error(`dataset ${path} has no question rows`);
   return out;
@@ -189,30 +205,48 @@ function main(): void {
   // the pool rows' `session_id` is raw too) next to `gold_total` / `gold_found`;
   // older captures carried only the counts, and `--dataset` back-fills the ids
   // for those by question_id. Scoring recall against an empty gold set would
-  // print 0% everywhere, so a capture with no gold anywhere and no dataset is
-  // refused rather than silently mis-scored.
+  // silently print a miss at every floor for that question, so ANY question
+  // row left without gold — a capture without --dataset that has even one
+  // gold-less row, a capture question absent from the dataset, or a dataset
+  // row whose answer_session_ids is missing / not an array — is refused (exit 1)
+  // with the count named, rather than mis-scored.
+  const goldless = (): number => parsed.rows.filter((r) => r.answer_session_ids.length === 0).length;
   if (args.dataset) {
-    let gold: Map<string, string[]>;
+    let gold: Map<string, string[] | null>;
     try {
       gold = loadGold(args.dataset);
     } catch (err) {
       process.stderr.write(`replay-autocut-floor: ${(err as Error).message}\n`);
       process.exit(1);
     }
-    let missing = 0;
+    let absent = 0;
+    let noGold = 0;
     for (const row of parsed.rows) {
       if (row.answer_session_ids.length > 0) continue;
+      if (!gold.has(row.question_id)) {
+        absent++;
+        continue;
+      }
       const g = gold.get(row.question_id);
-      if (g) row.answer_session_ids = g;
-      else missing++;
+      if (!g || g.length === 0) {
+        noGold++;
+        continue;
+      }
+      row.answer_session_ids = g;
     }
-    if (missing > 0) {
-      process.stderr.write(`replay-autocut-floor: ${missing} capture row(s) have no question in ${args.dataset}\n`);
+    if (absent > 0) process.stderr.write(`replay-autocut-floor: ${absent} capture row(s) have no question in ${args.dataset}\n`);
+    if (noGold > 0) {
+      process.stderr.write(`replay-autocut-floor: ${noGold} capture row(s) match a question in ${args.dataset} whose answer_session_ids is missing or not a non-empty array\n`);
+    }
+    if (absent + noGold > 0) process.exit(1);
+  } else {
+    const n = goldless();
+    if (n > 0) {
+      process.stderr.write(
+        `replay-autocut-floor: ${n} of ${parsed.rows.length} capture row(s) carry no answer_session_ids — pass --dataset <longmemeval json> to join the gold session ids (scoring them would count every floor as a miss)\n`,
+      );
       process.exit(1);
     }
-  } else if (parsed.rows.every((r) => r.answer_session_ids.length === 0)) {
-    process.stderr.write('replay-autocut-floor: no capture row carries answer_session_ids — pass --dataset <longmemeval json> to join the gold session ids\n');
-    process.exit(1);
   }
 
   let validateMismatches: ReturnType<typeof validateLive> = [];

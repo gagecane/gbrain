@@ -41,17 +41,25 @@
 # GBRAIN_EVAL_ACTUAL_COST_FILE is unset, a temp path is exported to the child
 # so harnesses can report usage-derived cost without operator setup.
 #
-# Signals: on INT/TERM/HUP the guard sends SIGTERM to the command, waits for
-# it, reconciles at the ESTIMATE with exit_code 128+N, and exits 128+N. An EXIT
-# trap reconciles at the estimate on any other early exit. SIGKILL cannot be
-# trapped — the reservation row is what keeps that spend counted. If the
-# reconciliation append itself fails the guard says so and exits 3; the
+# Signals: on INT/TERM/HUP the guard sends SIGTERM to the command, waits up to
+# $GBRAIN_EVAL_SPEND_GUARD_KILL_GRACE_SECONDS (default 10) for it to exit, then
+# SIGKILLs it, reconciles at the ESTIMATE with exit_code 128+N, and exits
+# 128+N. An EXIT trap reconciles at the estimate on any other early exit. The
+# traps are installed BEFORE the reservation row is appended (a RESERVED flag
+# tells them whether there is anything to reconcile), so a signal landing in
+# the instant between the append and the launch still reconciles. SIGKILL
+# cannot be trapped — the reservation row is what keeps that spend counted. If
+# the reconciliation append itself fails the guard says so and exits 3; the
 # reservation stays on the books. Where `flock` exists, audit → cap check →
 # reservation is serialized across concurrent guards via <ledger>.lock.
 #
+# The audit itself is fail-closed: a ledger that exists but cannot be read, an
+# awk that exits non-zero, or an audit line that is not `<int> <int> <decimal>
+# <int> …` refuses the launch (exit 3) — an empty audit must never read as $0.
+#
 # Exit codes: the wrapped command's exit code (128+N when the guard was
 # signalled) · 2 usage error · 3 refused (cap exceeded, ledger missing,
-# unparseable, or unwritable).
+# unreadable, unparseable, or unwritable).
 
 set -u
 
@@ -152,8 +160,27 @@ if command -v flock >/dev/null 2>&1 && ( : >> "$LOCK" ) 2>/dev/null && exec 9>>"
   flock -w 60 9 || { echo "eval-spend-guard: REFUSED — could not lock $LOCK within 60s (another guard holds it); command NOT run: $*" >&2; exit 3; }
 fi
 
-AUDIT="$(ledger_audit "$LEDGER")"
+# An audit the guard cannot trust is a refusal, never a $0 ledger: gawk exits 0
+# with an all-zero END line on a file it could not open, so the read check, the
+# awk status AND the shape of every field are all required.
+refuse_audit() {  # <reason>
+  echo "eval-spend-guard: REFUSED — cannot audit ledger $LEDGER: $1" >&2
+  echo "eval-spend-guard: an unreadable ledger is NOT a \$0 ledger; fix the file's permissions or contents — never guess spend" >&2
+  echo "eval-spend-guard: command NOT run: $CMD_WORDS" >&2
+  exit 3
+}
+audit_shape_ok() {  # <lines> <parsed> <total> <open>
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  case "$2" in ''|*[!0-9]*) return 1 ;; esac
+  case "$3" in ''|*[!0-9.]*|.|*.*.*) return 1 ;; esac
+  case "$4" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+CMD_WORDS="$*"
+[ -r "$LEDGER" ] || refuse_audit "file is not readable"
+AUDIT="$(ledger_audit "$LEDGER")" || refuse_audit "awk exited $? while summing it"
 read -r LINES PARSED TOTAL OPEN BAD <<< "$AUDIT"
+audit_shape_ok "${LINES:-}" "${PARSED:-}" "${TOTAL:-}" "${OPEN:-}" || refuse_audit "audit line is malformed ('$AUDIT')"
 [ "$LINES" = "$PARSED" ] || refuse_unparseable "$@"
 
 PROJECTED="$(awk -v a="$TOTAL" -v b="$EST" 'BEGIN { printf "%.6f", a + b }')"
@@ -168,24 +195,35 @@ fi
 echo "eval-spend-guard: ledger \$${TOTAL} ($LINES row(s)) + estimate \$${EST} = \$${PROJECTED} <= cap \$${CAP}; launching" >&2
 [ "$OPEN" != "0" ] && echo "eval-spend-guard: $OPEN in-flight reservation(s) counted at their estimate" >&2
 
-# JSON-escape the command (backslash, quote, control chars) without jq.
-CMD_JSON="$(printf '%s' "$*" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }')"
+# JSON-escape the command (backslash, quote, EVERY control char) without jq —
+# a character walk in awk under LC_ALL=C, so it is byte-exact and portable
+# (GNU sed's `\t` is not: BSD/macOS sed would have matched a literal `t`).
+# Tabs / CR / LF get their short escapes, other controls `\u00XX`; multi-byte
+# UTF-8 passes through untouched.
+json_escape() {
+  printf '%s' "$1" | LC_ALL=C awk '
+    BEGIN { for (i = 1; i < 32; i++) ctl[sprintf("%c", i)] = i; u = "\\" "u%04x" }
+    {
+      if (NR > 1) printf "\\n"
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (c == "\\") printf "\\\\"
+        else if (c == "\"") printf "\\\""
+        else if (c == "\t") printf "\\t"
+        else if (c == "\r") printf "\\r"
+        else if (c in ctl) printf u, ctl[c]
+        else printf "%s", c
+      }
+    }'
+}
+CMD_JSON="$(json_escape "$*")"
 RUN_ID="$(uuidgen 2>/dev/null || printf '%s-%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$$" "$RANDOM$RANDOM")"
 
 append_row() {  # <status> <cost> <exit_code|null>; non-zero when the append fails
   printf '{"ts":"%s","run_id":"%s","status":"%s","estimate_usd":%s,"cost_usd":%s,"exit_code":%s,"command":"%s"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_ID" "$1" "$EST" "$2" "$3" "$CMD_JSON" >> "$LEDGER"
 }
-
-# Reservation first: a launch that is not on the books is a cap that cannot be
-# enforced against it, so an unwritable ledger refuses the launch.
-if ! append_row running "$EST" null; then
-  echo "eval-spend-guard: REFUSED — cannot append the reservation row to ledger $LEDGER" >&2
-  echo "eval-spend-guard: command NOT run: $*" >&2
-  exit 3
-fi
-exec 9>&-   # release the lock (if held) before the command starts
-echo "eval-spend-guard: reserved \$${EST} (run $RUN_ID)" >&2
 
 # Cost file: honor the operator's path or hand the child a scratch one.
 CLEANUP_COST_FILE=0
@@ -196,7 +234,9 @@ if [ -z "${GBRAIN_EVAL_ACTUAL_COST_FILE:-}" ]; then
 fi
 export GBRAIN_EVAL_ACTUAL_COST_FILE
 
-# Reconcile exactly once (normal exit, signal, or EXIT-trap backstop).
+# Reconcile exactly once (normal exit, signal, or EXIT-trap backstop), and
+# only once there is a reservation to reconcile (RESERVED).
+RESERVED=0
 RECONCILED=0
 reconcile() {  # <cost> <exit_code>; returns 1 when the ledger append fails
   [ "$RECONCILED" = "1" ] && return 0
@@ -206,23 +246,64 @@ reconcile() {  # <cost> <exit_code>; returns 1 when the ledger append fails
     echo "eval-spend-guard: FAILED to append the reconciliation row to $LEDGER — the \$${EST} reservation for run $RUN_ID stays on the books" >&2
     return 1
   fi
-  AFTER="$(ledger_audit "$LEDGER")"; read -r _ _ AFTER _ <<< "$AFTER"
-  echo "eval-spend-guard: recorded cost \$${1} (exit $2); ledger now \$${AFTER}" >&2
+  AFTER="$(ledger_audit "$LEDGER" 2>/dev/null)" || AFTER=""
+  read -r _ _ AFTER _ <<< "$AFTER"
+  case "${AFTER:-}" in ''|*[!0-9.]*) AFTER="(unreadable)" ;; *) AFTER="\$${AFTER}" ;; esac
+  echo "eval-spend-guard: recorded cost \$${1} (exit $2); ledger now ${AFTER}" >&2
 }
 
+# Stop the command: SIGTERM, then up to KILL_GRACE seconds (10 by default;
+# GBRAIN_EVAL_SPEND_GUARD_KILL_GRACE_SECONDS overrides) before SIGKILL, so a
+# command that ignores SIGTERM cannot keep the guard — and its reservation —
+# hanging forever. Polled in 0.1 s steps; `wait` reaps it either way.
+KILL_GRACE="${GBRAIN_EVAL_SPEND_GUARD_KILL_GRACE_SECONDS:-10}"
+case "$KILL_GRACE" in ''|*[!0-9]*) KILL_GRACE=10 ;; esac
 CHILD=""
+stop_child() {
+  [ -n "$CHILD" ] || return 0
+  kill -TERM "$CHILD" 2>/dev/null
+  i=0
+  while [ "$i" -lt "$((KILL_GRACE * 10))" ] && kill -0 "$CHILD" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$CHILD" 2>/dev/null; then
+    echo "eval-spend-guard: command did not exit within ${KILL_GRACE}s of SIGTERM — sending SIGKILL" >&2
+    kill -KILL "$CHILD" 2>/dev/null
+  fi
+  wait "$CHILD" 2>/dev/null
+}
 on_signal() {  # <signal number>
   trap - INT TERM HUP
   echo "eval-spend-guard: interrupted (signal $1) — stopping the command and recording the estimate" >&2
-  if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; fi
-  reconcile "$EST" "$((128 + $1))" || exit 3
+  stop_child
+  if [ "$RESERVED" = "1" ]; then reconcile "$EST" "$((128 + $1))" || exit 3; fi
   exit "$((128 + $1))"
 }
-on_exit() { reconcile "$EST" "$1" || exit 3; }
+on_exit() {  # <exit status>
+  [ "$RESERVED" = "1" ] || return 0
+  reconcile "$EST" "$1" || exit 3
+}
+# Traps BEFORE the reservation: a signal in the append→launch window must
+# still reconcile (RESERVED gates whether there is anything to reconcile).
 trap 'on_signal 2' INT
 trap 'on_signal 15' TERM
 trap 'on_signal 1' HUP
 trap 'on_exit $?' EXIT
+
+# Reservation first: a launch that is not on the books is a cap that cannot be
+# enforced against it, so an unwritable ledger refuses the launch. RESERVED is
+# raised BEFORE the append so a signal mid-append reconciles (over-stating by
+# the estimate at worst — the safe direction); a failed append lowers it again.
+RESERVED=1
+if ! append_row running "$EST" null; then
+  RESERVED=0
+  echo "eval-spend-guard: REFUSED — cannot append the reservation row to ledger $LEDGER" >&2
+  echo "eval-spend-guard: command NOT run: $*" >&2
+  exit 3
+fi
+exec 9>&-   # release the lock (if held) before the command starts
+echo "eval-spend-guard: reserved \$${EST} (run $RUN_ID)" >&2
 
 # Run the command as a job so a trapped signal interrupts `wait` (a foreground
 # child would defer the trap until it exited). `<&0` keeps the child's stdin.

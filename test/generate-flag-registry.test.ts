@@ -18,7 +18,7 @@
  * refused; per-subcommand rows are a filed TODO, not this lane.
  */
 import { describe, test, expect } from 'bun:test';
-import { segmentDispatchBlocks, buildFlagRegistry, isValueOnlyImport } from '../scripts/generate-flag-registry.ts';
+import { segmentDispatchBlocks, buildFlagRegistry, isValueOnlyImport, stripComments } from '../scripts/generate-flag-registry.ts';
 import { CLI_FLAG_REGISTRY } from '../src/core/cli-flag-registry.generated.ts';
 import { validateCommandFlags } from '../src/cli.ts';
 
@@ -134,6 +134,53 @@ describe('segmentDispatchBlocks — every if/case shape is a marker for its comm
     const blocks = segmentDispatchBlocks(SNIPPET);
     expect(blocks.has('serve')).toBe(false);
     expect(blocks.get('gamma')).toContain('degradable');
+  });
+
+  test('a comment between two markers registers no flags for the preceding marker', () => {
+    // cli.ts: the `reindex --help` bypass is introduced by a comment naming
+    // "the --multimodal flags the dispatcher parses"; that comment sits AFTER
+    // the storage marker and BEFORE the reindex marker, so storage grew a
+    // phantom --multimodal. Comments are prose, not consumption.
+    const snippet = [
+      `  if (command === 'storage' && args.includes('--help')) {`,
+      `    const { runStorage } = await import('./commands/storage.ts');`,
+      `  }`,
+      ``,
+      `  // reindex --help — the usage block (incl. the --multimodal flags`,
+      `  // the dispatcher parses) lives in reindex.ts. /* --block-comment-flag */`,
+      `  /* a block comment`,
+      `     mentioning --spanning-flag too */`,
+      `  if (command === 'reindex' && args.includes('--help')) {`,
+      `    printReindexHelp(); // prints --real-reindex-flag help`,
+      `    const url = 'https://example.invalid/not-a-comment --in-string-flag';`,
+      `  }`,
+    ].join('\n');
+    const blocks = segmentDispatchBlocks(snippet);
+    expect(blocks.get('storage')).not.toContain('--multimodal');
+    expect(blocks.get('storage')).not.toContain('--block-comment-flag');
+    expect(blocks.get('storage')).not.toContain('--spanning-flag');
+    expect(blocks.get('reindex')).not.toContain('--real-reindex-flag'); // trailing // comment
+    expect(blocks.get('reindex')).toContain('--in-string-flag'); // a `//` inside a string literal is not a comment
+    expect(blocks.get('reindex')).toContain('printReindexHelp');
+    expect(blocks.get('storage')).toContain(`import('./commands/storage.ts')`);
+    // Line structure survives stripping (isValueOnlyImport scans by line):
+    // the storage block has exactly as many lines as its raw slice.
+    const rawStorage = snippet.slice(0, snippet.indexOf(`  if (command === 'reindex'`));
+    expect(blocks.get('storage')!.split('\n').length).toBe(rawStorage.split('\n').length);
+  });
+
+  test('stripComments: line + block comments go, newlines and string literals stay', () => {
+    const src = "a(); // --c1\nb('x // --c2'); /* --c3\n --c4 */ c(); `t // --c5 ${d}`\n\"q /* --c6 */\"";
+    const out = stripComments(src);
+    expect(out).toBe("a(); \nb('x // --c2'); \n c(); `t // --c5 ${d}`\n\"q /* --c6 */\"");
+    expect(out.split('\n').length).toBe(src.split('\n').length);
+    // An unterminated block comment strips to the end without throwing.
+    expect(stripComments('x /* never closed --c7')).toBe('x ');
+  });
+
+  test('committed registry: storage does not carry the phantom --multimodal (reindex still does)', () => {
+    expect(CLI_FLAG_REGISTRY.storage).not.toContain('--multimodal');
+    expect(CLI_FLAG_REGISTRY.reindex).toContain('--multimodal');
   });
 
   test('the real handleCliOnly yields one block per eval bypass sub-owner', () => {

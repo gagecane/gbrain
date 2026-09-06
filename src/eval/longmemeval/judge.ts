@@ -44,6 +44,7 @@ import {
   estimateJudgeCallUsd,
   runJudge,
   type JudgeChatFn,
+  type JudgeErrorClass,
   type JudgeVerdict,
 } from '../shared/judge-runner.ts';
 
@@ -128,11 +129,17 @@ export function judgePromptKind(questionId: string, questionType: string): Judge
   return 'standard'; // deviation 4: upstream has no branch for an unknown type
 }
 
-/** Neutralise `<judge_input>` / `</judge_input>` inside graded data (case-preserving) so the data cannot close the envelope. */
+/**
+ * Neutralise `<judge_input>` / `</judge_input>` inside graded data
+ * (case-preserving) so the data cannot close the envelope. Whitespace is
+ * tolerated anywhere a browser-style parser would tolerate it — before AND
+ * after the slash (`< /judge_input>`, `<  / judge_input >`) — the same shape
+ * sanitize.ts uses for `</chat_session>`.
+ */
 export function escapeJudgeData(text: string | number | null | undefined): string {
   // Integer golds (32 of the 500 LongMemEval-S answers) arrive as numbers; the
   // official evaluator interpolates them with an f-string, i.e. their decimal form.
-  return String(text ?? '').replace(/<\/?\s*judge_input\b[^>]*>/gi, m => `&lt;${m.slice(1, -1)}&gt;`);
+  return String(text ?? '').replace(/<\s*\/?\s*judge_input\b[^>]*>/gi, m => `&lt;${m.slice(1, -1)}&gt;`);
 }
 
 export interface JudgePromptInput {
@@ -283,6 +290,58 @@ export interface JudgeRowFields {
 
 export const JUDGE_RAW_MAX_CHARS = 200;
 
+/**
+ * `JudgeRowFields` for a judge_error row whose `judge_config_hash` may be
+ * absent: the backfill's catch-all leaves the hash off when the hasher itself
+ * threw, so the next resume re-judges the row instead of trusting a stamp.
+ */
+export type JudgeErrorRowFields = Omit<JudgeRowFields, 'judge_config_hash'> & { judge_config_hash?: string };
+
+/** Runner telemetry for an error that reached the judge call (absent on a throw before/around the call). */
+export interface JudgeErrorTelemetry {
+  response_model: string | null;
+  raw: string;
+  cost_usd: number | null;
+  attempts: number;
+}
+
+/**
+ * The ONE definition of the judge_error field set — used by `judgeRow`'s
+ * error branch and by `runJudgeBackfill`'s catch-all so both stamp the same
+ * keys. `detail` is secret-redacted and capped at `JUDGE_RAW_MAX_CHARS`.
+ * Without `telemetry` (a throw outside the runner) the call-shaped fields
+ * default to snapshot null / raw '' / cost null / attempts 1.
+ */
+export function errorJudgeFields(
+  ctx: Pick<JudgeLaneContext, 'model'>, kind: JudgePromptKind, configHash: string,
+  err: { judge_error: JudgeErrorClass; detail: string }, telemetry?: JudgeErrorTelemetry,
+): JudgeRowFields;
+export function errorJudgeFields(
+  ctx: Pick<JudgeLaneContext, 'model'>, kind: JudgePromptKind, configHash: string | null,
+  err: { judge_error: JudgeErrorClass; detail: string }, telemetry?: JudgeErrorTelemetry,
+): JudgeErrorRowFields;
+export function errorJudgeFields(
+  ctx: Pick<JudgeLaneContext, 'model'>,
+  kind: JudgePromptKind,
+  configHash: string | null,
+  err: { judge_error: JudgeErrorClass; detail: string },
+  telemetry?: JudgeErrorTelemetry,
+): JudgeErrorRowFields {
+  const fields: JudgeErrorRowFields = {
+    judge_error: err.judge_error,
+    judge_error_detail: redactSecrets(err.detail).slice(0, JUDGE_RAW_MAX_CHARS),
+    judge_model: ctx.model,
+    judge_model_snapshot: telemetry?.response_model ?? null,
+    judge_raw: telemetry ? telemetry.raw.slice(0, JUDGE_RAW_MAX_CHARS) : '',
+    judge_cost_usd: telemetry?.cost_usd ?? null,
+    judge_attempts: telemetry?.attempts ?? 1,
+    judge_prompt_kind: kind,
+    judge_prompt_version: JUDGE_PROMPT_VERSION,
+  };
+  if (configHash !== null) fields.judge_config_hash = configHash;
+  return fields;
+}
+
 /** Strip any prior judge fields so a re-judge cannot leave stale keys behind. */
 export function stripJudgeFields<T extends Record<string, unknown>>(row: T): T {
   for (const k of Object.keys(row)) if (k.startsWith('judge_')) delete row[k];
@@ -323,17 +382,13 @@ export async function judgeRow(
     sleep: ctx.sleep,
   });
   ctx.ledger.record(outcome.cost_usd);
-  const fields: JudgeRowFields = {
+  if (outcome.kind === 'error') return errorJudgeFields(ctx, kind, configHash, outcome, outcome);
+  return {
+    judge_correct: outcome.verdict === 'correct',
     judge_model_snapshot: outcome.response_model,
     judge_raw: outcome.raw.slice(0, JUDGE_RAW_MAX_CHARS),
     judge_cost_usd: outcome.cost_usd,
     judge_attempts: outcome.attempts,
     ...common,
   };
-  if (outcome.kind === 'verdict') fields.judge_correct = outcome.verdict === 'correct';
-  else {
-    fields.judge_error = outcome.judge_error;
-    fields.judge_error_detail = redactSecrets(outcome.detail).slice(0, JUDGE_RAW_MAX_CHARS);
-  }
-  return fields;
 }

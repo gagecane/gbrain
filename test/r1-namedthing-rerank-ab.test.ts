@@ -6,7 +6,7 @@
  * "ON arm skipped" contract.
  */
 
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll  } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +21,7 @@ import {
   R1_ON_RERANKER_MODEL,
   SEARCH_PIN_RESERVED,
   applyArmPins,
+  buildOverlay,
   embedIntegrityProblems,
   onArmIntegrityProblems,
   pairArms,
@@ -300,6 +301,36 @@ describe('CLI', () => {
     });
     // A value may itself contain '=' — only the first one splits.
     expect(parseArgs(['--search-pin', 'search.x=a=b']).searchPins).toEqual({ 'search.x': 'a=b' });
+  });
+
+  test('buildOverlay: explicit --autocut / --relational-pin win over a colliding --search-pin (search pins spread first)', () => {
+    // Pre-fix the search pins were spread LAST, so a pasted
+    // `--search-pin search.autocut=false` silently overrode `--autocut on`.
+    expect(buildOverlay(parseArgs(['--autocut', 'on', '--search-pin', 'search.autocut=false']))).toEqual({ 'search.autocut': 'true' });
+    expect(buildOverlay(parseArgs(['--search-pin', 'search.autocut=false', '--autocut', 'on']))).toEqual({ 'search.autocut': 'true' });
+    expect(buildOverlay(parseArgs(['--relational-pin', '3', '--search-pin', 'search.relational_rerank_pin=9']))).toEqual({ 'search.relational_rerank_pin': '3' });
+    // Non-colliding search pins ride along untouched; no explicit flag → the pin stands.
+    expect(buildOverlay(parseArgs(['--autocut', 'off', '--search-pin', 'search.token_budget=4000', '--search-pin', 'search.autocut=true']))).toEqual({
+      'search.token_budget': '4000',
+      'search.autocut': 'false',
+    });
+    expect(buildOverlay(parseArgs(['--search-pin', 'search.autocut=true']))).toEqual({ 'search.autocut': 'true' });
+    expect(buildOverlay(parseArgs([]))).toEqual({});
+  });
+
+  describe('applyArmPins with the built overlay (config plane)', () => {
+    let overlayEngine: PGLiteEngine;
+    beforeAll(async () => {
+      overlayEngine = new PGLiteEngine();
+      await overlayEngine.connect({});
+      await overlayEngine.initSchema();
+    });
+    afterAll(async () => { await overlayEngine.disconnect(); });
+    test('the explicit flag lands on the config plane over a colliding --search-pin', async () => {
+      await applyArmPins(overlayEngine, 'off', buildOverlay(parseArgs(['--autocut', 'on', '--search-pin', 'search.autocut=false'])));
+      expect(await overlayEngine.getConfig('search.autocut')).toBe('true');
+      expect(await overlayEngine.getConfig('search.reranker.enabled')).toBe('false');
+    });
   });
 
   test('SEARCH_PIN_RESERVED covers the reranker keys and nothing else', () => {

@@ -124,7 +124,7 @@ export function distinctRetrievedSessions(
   const seen = new Set<string>();
   const out: RetrievedSession[] = [];
   for (const r of results) {
-    const sid = resolveSessionId(r.slug, slugToRaw);
+    const sid = rawSessionId(r.slug, slugToRaw);
     if (seen.has(sid)) continue;
     seen.add(sid);
     const entry: RetrievedSession = { session_id: sid, rank: out.length + 1, score: r.score };
@@ -373,7 +373,7 @@ export function buildRow(input: BuildRowInput): LongMemEvalRow {
     const row: RetrievedRow = {
       slug: r.slug,
       chunk_id: r.chunk_id,
-      session_id: resolveSessionId(r.slug, slugToRaw),
+      session_id: rawSessionId(r.slug, slugToRaw),
       rank: i + 1,
       score: r.score,
     };
@@ -405,12 +405,19 @@ export function buildRow(input: BuildRowInput): LongMemEvalRow {
   return scored;
 }
 
-// ---------------------------------------------------------------------------
-
-function resolveSessionId(slug: string, slugToRaw?: SlugToRawMap): string {
+/**
+ * RAW dataset session id for a slug through the per-question map; the
+ * normalized slug tail when the slug is unmapped (or no map is given). On a
+ * colliding slug the FIRST raw id in haystack order is returned. The ONE
+ * slug→raw resolver: the reader, the capture receipt and the miss
+ * diagnostics all join through this function.
+ */
+export function rawSessionId(slug: string, slugToRaw?: SlugToRawMap): string {
   const raws = slugToRaw?.get(slug);
   return raws && raws.length > 0 ? raws[0] : sessionIdFromSlug(slug);
 }
+
+// ---------------------------------------------------------------------------
 
 function bucketStats(b: RecallBucket): RecallTypeStats {
   return {

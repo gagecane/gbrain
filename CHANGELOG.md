@@ -79,6 +79,11 @@ gbrain config set search.metadata_boost_gate always   # pre-wave boosts
 - The relational pin trusts your graph. A stale or wrong edge now puts up to
   three edge pages at the top of the results instead of one at the end of
   page 1; `gbrain config set search.relational_rerank_pin off` if that bites.
+- `gbrain eval longmemeval` under a reranked mode without `VOYAGE_API_KEY` now
+  refuses to start (exit 2, naming the fix) instead of quietly scoring
+  un-reranked rows, and a resume of a file that already holds un-reranked
+  rows exits 1; pass `--reranker off`
+  for a reranker-free run.
 
 ### Measured
 
@@ -218,7 +223,10 @@ is in `docs/eval-bench.md`.
 - **LongMemEval harness** (`gbrain eval longmemeval`): strict `recall_all@5`
   + `recall_any@5` per row and per type (`schema_version: 2`), abstention
   exclusion (`--include-abstention`), raw-id join with `slug_collision`
-  detection, `--reranker on|off` (readiness preflight, exit 2), `--autocut on|off`,
+  detection, `--reranker on|off` (readiness preflight, exit 2 — the gate keys
+  on the RESOLVED reranker pin, whether it came from the flag, a `--search-pin`,
+  a snapshot or the mode bundle, and a run in which every question errored
+  exits 1), `--autocut on|off`,
   `--search-pin KEY=VALUE`, `--expansion-variant-budget`, `--expansion-replay FILE`
   (recorded variants), `--question-ids FILE` (dev slice), `--embed-cache FILE`
   (content-addressed bun:sqlite cache with dims verification and a canonical

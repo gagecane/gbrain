@@ -105,6 +105,33 @@ describe('decideMetadataBoosts — the gate × lexicalVoted matrix', () => {
     );
     expect(cells.filter((c) => !c.boosts_applied)).toHaveLength(1);
   });
+
+  test('image modality is exempt from lexical: no lexical arm ever runs for an image query, so boosts apply (image_modality)', () => {
+    // hybrid.ts skips the keyword/title arms and excludes the relational arm
+    // for image modality by construction — lexicalVoted is false for EVERY
+    // image query. Without the exemption `lexical` would silently disable the
+    // backlink/salience/recency/graph boosts for the whole modality.
+    expect(decideMetadataBoosts({ gate: 'lexical', lexicalVoted: false, modality: 'image' })).toEqual({
+      gate: 'lexical', lexical_voted: false, boosts_applied: true, reason: 'image_modality',
+    });
+    // `always` keeps its own reason (byte-identical pre-knob pipeline).
+    expect(decideMetadataBoosts({ gate: 'always', lexicalVoted: false, modality: 'image' })).toEqual({
+      gate: 'always', lexical_voted: false, boosts_applied: true, reason: 'gate_always',
+    });
+    // text / both / unset take the vote-based decision unchanged.
+    for (const modality of ['text', 'both', undefined] as const) {
+      expect(decideMetadataBoosts({ gate: 'lexical', lexicalVoted: false, modality }).reason).toBe('vector_only_voter');
+      expect(decideMetadataBoosts({ gate: 'lexical', lexicalVoted: true, modality }).reason).toBe('lexical_voted');
+    }
+    // Across the full gate × voted × modality matrix, only vector_only_voter skips.
+    const cells = (['always', 'lexical'] as const).flatMap((gate) =>
+      [true, false].flatMap((lexicalVoted) =>
+        (['text', 'image', 'both', undefined] as const).map((modality) => decideMetadataBoosts({ gate, lexicalVoted, modality })),
+      ),
+    );
+    expect(cells.filter((c) => !c.boosts_applied).every((c) => c.reason === 'vector_only_voter')).toBe(true);
+    expect(cells.filter((c) => !c.boosts_applied)).toHaveLength(3); // lexical × not-voted × {text, both, undefined}
+  });
 });
 
 describe('lexicalArmsVoted — mirrors composeFusionLists inclusion rules', () => {
@@ -140,6 +167,10 @@ describe('runPostFusionStages — skipMetadataBoosts threads through as ONE bloc
       getSalienceScores: async () => { calls.push('salience'); return new Map([['default::hub', 10]]); },
       getEffectiveDates: async () => { calls.push('dates'); return new Map([['default::hub', new Date()]]); },
       executeRaw: async (sql: string) => { calls.push(`raw:${/slug_aliases/.test(sql) ? 'alias' : /supersedes/.test(sql) ? 'supersede' : 'other'}`); return []; },
+      // Graph-signals stage (applyGraphSignals → engine.getAdjacencyBoosts). Without
+      // this the stub throws and BOTH paths fail open, so the assertions below
+      // could not tell a skipped stage from a broken one.
+      getAdjacencyBoosts: async () => { calls.push('graph'); return new Map(); },
     };
     return { engine, calls };
   }
@@ -162,6 +193,7 @@ describe('runPostFusionStages — skipMetadataBoosts threads through as ONE bloc
     expect(calls).not.toContain('salience');
     expect(calls).not.toContain('dates');
     expect(calls).not.toContain('raw:alias');
+    expect(calls).not.toContain('graph');
     // Correctness stage untouched: the supersede-edge probe still fires.
     expect(calls).toContain('raw:supersede');
   });
@@ -176,6 +208,8 @@ describe('runPostFusionStages — skipMetadataBoosts threads through as ONE bloc
       expect(calls).toContain('backlinks');
       expect(calls).toContain('salience');
       expect(calls).toContain('dates');
+      expect(calls).toContain('graph');
+      expect(calls).toContain('raw:alias');
     }
   });
 });

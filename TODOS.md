@@ -2075,7 +2075,7 @@ Each was explicitly deferred in the pass's CEO/eng/outside-voice reviews.
   pattern). **Why deferred:** exploitability bounded by GitHub cache scoping
   (fork caches isolated; poisoning needs push access) and impact is test-DB
   contents only. **Effort:** S. **Priority:** P3.
-- [ ] **Redact provider/DB strings in eval ledger writes.** **What:**
+- [x] **Redact provider/DB strings in eval ledger writes.** **Completed: v0.48.4.0 (2026-09-06)** — `persistRunRecord` (`src/commands/eval-run-all.ts`) now routes every record through `redactRunRecord` on the ONE shared write path — `error` text and every string leaf of `params` pass through `redactSecrets` (provider keys, bearer tokens, DB connection strings; leaves redacted individually so the JSON stays valid) — pinned by `test/eval-run-all.test.ts`. **What (original):**
   `EvalRunRecord.error` (free text) is persisted unredacted by
   `persistRunRecord` (eval-run-all) and the canary's record mode into the now-
   TRACKED `.gbrain-evals/eval-results.jsonl` — a failed keyed run whose error
