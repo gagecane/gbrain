@@ -107,8 +107,14 @@ export const ARM_PINS: Readonly<Record<ArmId, Readonly<Record<string, string>>>>
   }),
 });
 
-export async function applyArmPins(engine: Pick<BrainEngine, 'setConfig'>, arm: ArmId): Promise<void> {
-  for (const [k, v] of Object.entries(ARM_PINS[arm])) await engine.setConfig(k, v);
+export async function applyArmPins(
+  engine: Pick<BrainEngine, 'setConfig'>,
+  arm: ArmId,
+  overlay: Readonly<Record<string, string>> = {},
+): Promise<void> {
+  // `overlay` lets the operator run the ON arm in the exact shipped shape
+  // (e.g. --autocut on) without changing the pinned defaults the tests pin.
+  for (const [k, v] of Object.entries({ ...ARM_PINS[arm], ...overlay })) await engine.setConfig(k, v);
 }
 
 /** Every metric printed here routes through the shared glossary ([CDX-25]). */
@@ -460,6 +466,8 @@ export function renderMarkdown(p: R1Payload): string {
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
 interface Args {
+  /** --autocut on|off — overlays search.autocut on BOTH arms (default off = the pinned ARM_PINS). */
+  autocut?: 'on' | 'off';
   json: boolean;
   out?: string;
   embedCache?: string;
@@ -491,6 +499,7 @@ export function parseArgs(argv: string[]): Args {
     else if (x === '--relational') a.relational = true;
     else if (x === '--out') a.out = need(i++, x);
     else if (x === '--embed-cache') a.embedCache = need(i++, x);
+    else if (x === '--autocut') { const v = need(i++, x); if (v !== 'on' && v !== 'off') { process.stderr.write(`--autocut takes on|off (got ${v})\n`); usage(2); } a.autocut = v as 'on' | 'off'; }
     else if (x === '--limit') {
       a.limit = Number(need(i++, x));
       if (!Number.isInteger(a.limit) || a.limit < 3) {
@@ -583,7 +592,9 @@ async function main(): Promise<void> {
     const queryChars = questions.reduce((s, q) => s + q.query.length, 0);
 
     // OFF arm.
-    await applyArmPins(engine, 'off');
+    const overlay: Readonly<Record<string, string>> =
+      args.autocut === 'on' ? { 'search.autocut': 'true' } : args.autocut === 'off' ? { 'search.autocut': 'false' } : {};
+    await applyArmPins(engine, 'off', overlay);
     const off = await runArm(engine, 'off', questions, { limit: args.limit });
     if (!args.stubEmbed) embeddedChars += queryChars;
     log(`OFF arm: gate ${off.gate.pass ? 'PASS' : 'FAIL'}`);
@@ -609,7 +620,7 @@ async function main(): Promise<void> {
         }
         return res;
       });
-      await applyArmPins(engine, 'on');
+      await applyArmPins(engine, 'on', overlay);
       on = await runArm(engine, 'on', questions, { limit: args.limit });
       __setRerankTransportForTests(null);
       if (!cache) embeddedChars += queryChars;
@@ -646,7 +657,7 @@ async function main(): Promise<void> {
       reranker_readiness: readiness,
       embed_cache: cacheStats,
       identical_query_vectors: identical,
-      pins: ARM_PINS,
+      pins: { off: { ...ARM_PINS.off, ...overlay }, on: { ...ARM_PINS.on, ...overlay } },
       arms: { off, on },
       on_skipped: onSkipped,
       paired,
