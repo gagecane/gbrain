@@ -348,7 +348,7 @@ gbrain eval replay --against before.ndjson
 gbrain eval --qrels labels.tsv --config balanced.json
 ```
 
-The current measured LongMemEval result (93.19% session-level `recall_all@5`, cleaned S split, 470 scored questions, k=5, measured 2026-09-02 at gbrain v0.48.2.0), its per-type table, and the reranker-on arms live in [`docs/eval-bench.md`](../eval-bench.md#public-benchmarks-longmemeval).
+The current measured LongMemEval result (95.53% session-level `recall_all@5` on the release default path, 449/470, and 93.40% with the reranker off, 439/470; cleaned S split, 470 scored questions, k=5, measured 2026-09-06 by the in-repo harness), its per-type table, every arm of the ranker wave and the judged answer-accuracy row live in [`docs/eval-bench.md`](../eval-bench.md#public-benchmarks-longmemeval).
 
 Methodology + metric glossary in [`docs/eval/SEARCH_MODE_METHODOLOGY.md`](../eval/SEARCH_MODE_METHODOLOGY.md).
 

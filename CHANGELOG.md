@@ -8,7 +8,7 @@ All notable changes to GBrain will be documented in this file.
 
 Two shipped-default regressions in the ranking pipeline are fixed, both found
 by the wave's own receipts rather than by users. First, the cross-encoder
-reranker that `balanced` turned on in v0.48.2.0 scores page text, so an
+reranker that `balanced` runs (on `voyage:rerank-2.5` since v0.48.2.0) scores page text, so an
 answer that comes from your brain's typed-edge graph ("who invested in
 acme-example") need not mention the words you asked with, and the reranker
 pushed those answers off page 1. Relational answers are now pinned back

@@ -794,7 +794,7 @@ accuracy".
 ### Numbers
 
 p50 25.9ms / p99 30.3ms warm reset+import+search on Apple Silicon (per the
-`test/eval-longmemeval.test.ts` perf gate). Per-question cost well under the
+`test/eval-longmemeval.slow.test.ts` perf gate). Per-question cost well under the
 500ms speed gate. 500 questions = ~13s of overhead plus your retrieval and
 LLM latency.
 
