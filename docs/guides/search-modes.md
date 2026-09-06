@@ -51,8 +51,13 @@ Five of the knobs deserve a sentence:
   expansion halving small-k strict recall (93.19% → 54.89% `recall_all@5`); a
   number in (0, 4] caps the variants' total influence (`1.0` lets two agreeing
   variants exactly tie the original's top vote; `0.5` subordinates them). A
-  no-op when `expansion` is off. **Say to your agent:** *"Cap how much query
-  expansion can outvote my original query"* (no skill backs this; your agent
+  no-op when `expansion` is off. Ranker-wave receipt (same recorded variants
+  replayed at every budget): strict `recall_all@5` climbs monotonically as
+  the budget shrinks — 255/470 legacy → 394/470 at 0.25 — but even 0.25
+  trails plain hybrid (439/470) by 43 questions on the held-out decision set,
+  so the bundles keep `null` and the knob is an operator lever; if you keep
+  expansion on, `0.25` recovers most of the loss. **Say to your agent:**
+  *"Cap how much query expansion can outvote my original query"* (no skill backs this; your agent
   runs `gbrain config set search.expansion_variant_budget <b>`, and
   `gbrain config set search.expansion_variant_budget legacy` restores the
   default).

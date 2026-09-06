@@ -68,10 +68,18 @@ command runs through `scripts/eval-spend-guard.sh 75 <estimate> -- …`
   default), tuning 57.3 = projection; NamedThingBench 50/50, BrainBench,
   the retrieval canary and the LongMemEval dev slice (40/40) byte-identical →
   PASS, flipped to `lexical` in every bundle. Stretch (vector 60.5) not met.
-- **Expansion variant budget dev-slice sweep (A3 frozen variants via
-  `--expansion-replay`; budgets 2.0 / 1.0 / 0.5 / 0.25 on the 40):** pending
-  (receipts running). Decision rule: the largest budget within 1 question of
-  the best on the 40, then A3′ / A3′R on the 430.
+- **Expansion variant budget (A3 frozen variants via `--expansion-replay`):**
+  A3 (legacy weighting, reranker off) reproduced the regression: 255/470,
+  paired +3 / −187 vs A1 (sibling receipt 258, +3 / −183). Dev-slice sweep on
+  the 40: budget 2.0 → 24, 1.0 → 26, 0.5 → 30, 0.25 → 34 hits (A1 36) →
+  pick 0.25 (largest budget within 1 of the best). A3′ (balanced, reranker
+  off, 0.25): 394/470; on the 430 decision set 360 vs A1 403 (−43, paired
+  +2 / −45; multi-session −20, temporal −17) → rule FAILED. A3′R (tokenmax,
+  0.25, reranker on, autocut 0.35 as tokenmax shipped it): 381/470 vs A4
+  379 (+3 on the 430) — passes its literal rule but both arms sit under the
+  autocut cut that pins strict recall near 80%, so it is published as
+  confounded and does not justify a flip. Bundles stay `null`; the knob ships
+  for operators; CRAG-style conditional expansion is filed.
 - **Autocut floor replay (A4 `--capture-pool` capture; floors off / 0.10 /
   0.20 / 0.35 / 0.50 / 0.65 / 0.80; `--validate-live 0.35` reproduced all
   500 live decisions):** A4 (shipped default: reranker on, autocut 0.35)
