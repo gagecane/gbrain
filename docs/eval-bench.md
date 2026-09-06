@@ -506,7 +506,8 @@ curl -Lo ~/datasets/longmemeval/longmemeval_s_cleaned.json \
 export GBRAIN_EMBEDDING_MODEL=openai:text-embedding-3-large
 export GBRAIN_EMBEDDING_DIMENSIONS=1536
 
-# Like-for-like reproduction of the 93.19% row: retrieval-only at the published
+# Like-for-like reproduction of the 93.40% A1 row (the sibling runner's 93.19% receipt
+# reproduces here too): retrieval-only at the published
 # cutoff, reranker and autocut pinned off, --no-trajectory (skips the per-session
 # Haiku claim-extractor call, so no chat key is needed). --by-type appends the
 # schema-v2 summary: strict recall_all@5 per type + aggregate, any-hit as the

@@ -43,7 +43,7 @@ and maintenance commands remain available.
 - **`tokenmax`** — no token budget, LLM query expansion on, 50 results.
   Pairs with an expensive downstream model you want fully fed.
 
-Five of the knobs deserve a sentence:
+Seven of the knobs deserve a sentence:
 
 - **`expansion`** rewrites your query into multiple variants via a cheap
   LLM call per search (adds roughly $1.50 per 1K queries) — better recall,

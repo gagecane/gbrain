@@ -389,6 +389,7 @@ project resolves through `src/core/search/mode.ts`.
 | `tokenBudget`                 | **4000**       | **12000**  | **off**        |
 | `expansion` (LLM multi-query) | false          | false      | **true**       |
 | `relationalRetrieval`         | false          | **true**   | **true**       |
+| `relational_rerank_pin`       | 3              | 3          | 3              |
 | `metadata_boost_gate`         | lexical        | lexical    | lexical        |
 | `autocut` (rerank-cliff cut)  | off            | off        | off            |
 | `searchLimit` default         | 10             | 25         | 50             |
@@ -438,6 +439,8 @@ per `[CDX-5+6]` in `~/.claude/plans/lets-take-a-look-validated-parrot.md` — so
 `gbrain eval replay` and `gbrain eval longmemeval` test the same mode-affected
 behavior as the production `query` op.
 
+**Effective cache availability:** semantic result lookup and writes are temporarily disabled in the shared wrapper, regardless of mode, config, or `use_cache`. Stored rows and maintenance commands remain. `cache.status`, cache statistics and the mode dashboard report disabled. The following cache-key notes describe retained storage machinery, not active response reuse.
+
 **Cache key.** The `query_cache` lookup filters on `knobs_hash`
 (`WHERE source_id = $ AND knobs_hash = $ AND embedding similarity < $`) so a
 tokenmax write can't be served to a conservative read. `mode.ts:KNOBS_HASH_VERSION`
@@ -445,15 +448,16 @@ is the single source of truth; every result-affecting knob folds into `knobsHash
 (a version bump is a one-time cache-miss spike on upgrade); the version-by-version
 rationale lives in the comment chain at `test/search/knobs-hash-reranker.test.ts`.
 
-**Effective cache availability:** semantic result lookup and writes are temporarily disabled in the shared wrapper, regardless of mode, config, or `use_cache`. Stored rows and maintenance commands remain. `cache.status`, cache statistics and the mode dashboard report disabled. The following cache-key notes describe retained storage machinery, not active response reuse.
-
 **Relational retrieval (v0.42.34.0).** `relationalRetrieval` (on for
 balanced/tokenmax) adds a fourth recall arm: a relational query ("who invested
 in X", "what connects A and B") resolves its seed entity and walks the typed-edge
 graph (`src/core/search/relational-recall.ts` + `relational-intent.ts`,
 `engine.relationalFanout`), injecting edge-derived answers into RRF. Within-source,
 deterministic, mentions-excluded by default, pure no-op for non-relational queries.
-The `query` op's `relational` flag forces it on/off per call.
+The `query` op's `relational` flag forces it on/off per call. After the
+reranker, up to `relational_rerank_pin` (3 in every bundle) arm rows are re-pinned
+above the reranked text rows (`relational-rerank-pin.ts`);
+`gbrain config set search.relational_rerank_pin off` restores the pre-pin order.
 
 **Three CLI surfaces:**
 
