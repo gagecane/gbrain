@@ -168,6 +168,11 @@ deduplication (4-layer: per-page cap, same-page Jaccard, type diversity)
 reranker (cross-encoder — balanced/tokenmax; fail-open)
        │
        ▼
+relational re-pin (relational-arm rows back above the reranked text rows, in
+   fused order, ≤ search.relational_rerank_pin; only when the reranker actually
+   reordered — src/core/search/relational-rerank-pin.ts)
+       │
+       ▼
 alias hop (exact alias match injects/boosts the canonical page)
        │
        ▼
@@ -221,6 +226,32 @@ Two cross-cutting seams sit around the pipeline rather than inside it:
   `crag.ts`), so default-shape callers never pay a second expansion call for
   a near-identical candidate set. `search.crag_think=true` (local callers)
   escalates a still-weak result to `think`.
+
+### Relational re-pin: edge answers bypass reranker demotion
+
+The cross-encoder scores chunk TEXT against the query. The relational arm's
+rows are typed-EDGE answers — "who invested in acme-co" resolves to investor
+pages whose text need not mention acme-co at all — so a reranker ranks them
+below any page that merely contains the query's words. Measured on
+NamedThingBench's relational fixture (39 graph-relationship questions, the
+shipped `balanced` default, `scripts/r1-namedthing-rerank-ab.ts`): reranker
+off hit@1 21/39 · hit@3 27/39; reranker on hit@1 3/39 · hit@3 5/39, with the
+11 non-relational core questions unaffected. `pinRelationalRows`
+(`src/core/search/relational-rerank-pin.ts`) runs immediately after the
+reranker and re-pins the arm's rows above the reranked text rows in their fused
+order, bounded by `search.relational_rerank_pin` (3 in every bundle; `0`/`off`
+restores the pre-pin ranking). It is a permutation of the pool (nothing added
+or removed; one row per page; a relational row the reranker itself ranked
+higher keeps that position; ties go to the fused order), fires only when the
+reranker actually reordered (fail-open and reranker-off runs are untouched —
+the fused order already carries the arm), and is a pure no-op for
+non-relational queries. Pinned rows are stamped `relational_pinned` so autocut
+keeps them and leaves them out of its cliff math (text-row autocut is
+unchanged). The #3995 evidence slot still runs afterwards as the page-1
+guarantee for pin 0 / fail-open runs. The pin trusts the arm: a false-positive
+arm now puts up to `max` edge pages at the top instead of one at `limit` —
+turn it off per brain with `gbrain config set search.relational_rerank_pin off`.
+The knob folds into the query-cache key (`rrp=`).
 
 ### Autocut: score-discontinuity result-sizing
 

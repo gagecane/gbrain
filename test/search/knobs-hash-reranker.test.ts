@@ -94,6 +94,8 @@ describe('KNOBS_HASH_VERSION + version invariants', () => {
     // fused rows for identical knobs; version-only invalidation.
     // 28→29: evb= expansion variant budget fold (ranker wave) — budget-weighted
     // variant fusion reorders rows for identical knobs; null hashes as legacy.
+    // v=29 ALSO carries rrp= (relational rerank pin, ranker wave R1) — same
+    // epoch, no extra bump: neither part had shipped in a release yet.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
@@ -284,5 +286,16 @@ describe('v0.48.2 reranker default flip re-keys the cache (rrm= is folded uncond
       const withLegacy = knobsHash({ ...base, reranker_model: LEGACY_DEFAULT_RERANKER_MODEL });
       expect(withDefault).not.toBe(withLegacy);
     }
+  });
+});
+
+describe('ranker wave (R1): relational_rerank_pin participates in the hash (rrp=)', () => {
+  test('pin 3 (bundle) vs 0 (off) vs 1 → three distinct hashes; a partial-knobs literal hashes as the bundle default', () => {
+    const three = knobsHash({ ...baseKnobs(), relational_rerank_pin: 3 });
+    const off = knobsHash({ ...baseKnobs(), relational_rerank_pin: 0 });
+    const one = knobsHash({ ...baseKnobs(), relational_rerank_pin: 1 });
+    expect(new Set([three, off, one]).size).toBe(3);
+    const { relational_rerank_pin: _drop, ...partial } = baseKnobs();
+    expect(knobsHash(partial as ResolvedSearchKnobs)).toBe(three);
   });
 });

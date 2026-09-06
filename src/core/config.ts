@@ -1338,6 +1338,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.autocut_min_top',
   // Ranker wave: shared RRF weight budget for expansion variant lists (mode.ts reads; `legacy` | (0, 4]).
   'search.expansion_variant_budget',
+  // Ranker wave (R1): relational-arm rows re-pinned above reranked text rows (mode.ts reads; `off` | 0..10).
+  'search.relational_rerank_pin',
   'search.crag_escalation',
   'search.crag_think',
   // Models tier system (v0.31.12)

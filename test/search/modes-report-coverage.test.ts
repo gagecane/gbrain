@@ -47,12 +47,25 @@ describe('#4604 buildModesReport — full-bundle knob coverage', () => {
       'reranker_timeout_ms',
       'relationalRetrieval',
       'relational_retrieval_depth',
+      'relational_rerank_pin',
       'graph_signals',
       'autocut',
       'title_boost',
     ] as const) {
       expect(report.resolved[k]).toBeDefined();
     }
+  });
+
+  test('ranker wave (R1): relational_rerank_pin resolves to 3 from the bundle and attributes an off override', async () => {
+    // search.mode set → attribution is 'mode'; unset would read 'fallback' (balanced default).
+    const dflt = await buildModesReport(stubEngine({ 'search.mode': 'balanced' }));
+    expect(dflt.resolved.relational_rerank_pin.value).toBe(3);
+    expect(dflt.resolved.relational_rerank_pin.source).toBe('mode');
+    expect((await buildModesReport(stubEngine())).resolved.relational_rerank_pin.source).toBe('fallback');
+    const off = await buildModesReport(stubEngine({ 'search.relational_rerank_pin': 'off' }));
+    expect(off.resolved.relational_rerank_pin.value).toBe(0);
+    expect(off.resolved.relational_rerank_pin.source).toBe('override');
+    expect(formatKnobValue('relational_rerank_pin', 0)).toBe('0');
   });
 
   test('a live config override on a formerly-invisible knob is attributed', async () => {

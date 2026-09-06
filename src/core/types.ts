@@ -870,6 +870,13 @@ export interface SearchResult {
   /** Shortest connecting slug path seed→…→result (for "how I know this"). */
   relational_path?: string[];
   /**
+   * Ranker wave — set when `pinRelationalRows` (relational-rerank-pin.ts)
+   * re-pinned this relational-arm row above the reranked text rows. Autocut
+   * preserves stamped rows and excludes them from its cliff computation (they
+   * carry low cross-encoder scores by construction). Absent otherwise.
+   */
+  relational_pinned?: boolean;
+  /**
    * v0.40.4 full attribution (D12=A) — per-stage score deltas for the
    * `gbrain search --explain` formatter. Every boost stage stamps its
    * contribution so the formatter can reconstruct the score derivation.
@@ -1326,6 +1333,16 @@ export interface SearchOpts {
    */
   relationalRetrieval?: boolean;
   relationalRetrievalDepth?: number;
+  /**
+   * Ranker wave — per-call override for `search.relational_rerank_pin`
+   * (relational-arm rows re-pinned above reranked text rows; `0` disables).
+   * Per-call wins over config wins over the mode bundle; out-of-range values
+   * (negative, > 10, fractional, NaN) are treated as unset through the ONE
+   * range contract `normalizeRelationalRerankPin` (relational-rerank-pin.ts),
+   * in BOTH the inner search and the cache resolver (knobs hash reflects it).
+   * Eval A/B gates drive it here.
+   */
+  relationalRerankPin?: number;
 }
 
 /**
@@ -1937,6 +1954,14 @@ export interface HybridSearchMeta {
    * didn't fire. Surfaced for `gbrain search --explain`.
    */
   relational_evidence_slot?: import('./search/relational-recall.ts').RelationalEvidenceSlotDecision;
+  /**
+   * Ranker wave — relational rerank pin decision (knob, relational pages in
+   * the pool, the pinned rows with from/to/fused ranks, how many moved).
+   * Present only when the reranker reordered the pool AND at least one
+   * relational-arm row was pinned; omitted for non-relational queries, pin 0,
+   * and every reranker fail-open path. Surfaced for `gbrain search --explain`.
+   */
+  relational_rerank_pin?: import('./search/relational-rerank-pin.ts').RelationalRerankPinDecision;
   /**
    * v0.32.x (search-lite): token budget enforcement metadata. Omitted when
    * no budget was applied (backward-compatible with pre-search-lite

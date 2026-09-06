@@ -59,6 +59,7 @@ import {
 import { normalizeAlias } from './alias-normalize.ts';
 import { stampEvidence, markKeywordHits } from './evidence.ts';
 import { applyExactLookupTier } from './exact-lookup.ts';
+import { pinRelationalRows, normalizeRelationalRerankPin, type RelationalRerankPinDecision } from './relational-rerank-pin.ts';
 import { expandAnchors, hydrateChunks } from './two-pass.ts';
 import { enforceTokenBudget, searchSalvageEnabled, type TokenBudgetMeta } from './token-budget.ts';
 import { warnOncePerProcess } from '../utils.ts';
@@ -1239,6 +1240,9 @@ export async function hybridSearch(
       // negative / >4 / NaN per-call values become undefined (fall through)
       // instead of reaching fusion — and the cache key — unvalidated.
       expansion_variant_budget: normalizeExpansionVariantBudget(opts?.expansionVariantBudget),
+      // Ranker wave (R1) — relational rerank pin per-call thread-through (eval
+      // A/B); normalized through the ONE range contract (relational-rerank-pin.ts).
+      relational_rerank_pin: normalizeRelationalRerankPin(opts?.relationalRerankPin),
     },
   });
 
@@ -2218,10 +2222,21 @@ export async function hybridSearch(
       })
     : deduped;
 
+  // Ranker wave (R1 receipt) — relational-arm rows bypass reranker DEMOTION:
+  // re-pinned above the reranked text rows in fused order, bounded by
+  // `relational_rerank_pin` (0 = off). Only when the reranker actually
+  // reordered (applyReranker returns its input on every fail-open path; fused
+  // order already carries the arm) and never for image modality (the arm is
+  // not fused there). Contract + tie policy: relational-rerank-pin.ts.
+  let relationalRerankPin: RelationalRerankPinDecision | undefined;
+  const rerankPinned = reranked !== deduped && effectiveModality !== 'image'
+    ? pinRelationalRows(reranked, relationalList, { max: resolvedMode.relational_rerank_pin, fusedOrder: deduped, onPin: (d) => { relationalRerankPin = d; } })
+    : reranked;
+
   // T3 — free-text alias hop. Runs AFTER rerank so a query that is a page's
   // declared chosen name reliably surfaces that page regardless of how the
   // reranker scored body chunks. Fail-open on pre-v110 brains.
-  const preExact = await applyAliasHop(engine, reranked, query, {
+  const preExact = await applyAliasHop(engine, rerankPinned, query, {
     sourceId: opts?.sourceId,
     sourceIds: opts?.sourceIds,
     excludePrivate: opts?.excludePrivate,
@@ -2299,7 +2314,9 @@ export async function hybridSearch(
   if (resolvedMode.autocut && offset === 0) {
     const r = applyAutocut(
       returnPool,
-      (x) => x.rerank_score,
+      // Pinned relational rows are excluded from the cliff math (low scores by
+      // construction) and preserved below — text-row autocut is unchanged.
+      (x) => (x.relational_pinned ? undefined : x.rerank_score),
       // v0.46.15 (#1863): minTopScore is the weak-top floor — below it the
       // cliff signal is untrustworthy and autocut no-ops. #3621: minKeep is
       // now the configured floor instead of the hardcoded 1.
@@ -2314,7 +2331,7 @@ export async function hybridSearch(
       // be dropped whenever autocut cuts on the scored set (Codex P1).
       // #1663: same guarantee for structural exact-lookup tier hits (slug /
       // exact-title identity matches also arrive post-rerank, unscored).
-      (x) => x.alias_hit === true || x.exact_lookup !== undefined,
+      (x) => x.alias_hit === true || x.exact_lookup !== undefined || x.relational_pinned === true,
     );
     returnPool = r.kept;
     autocutDecision = r.decision;
@@ -2363,6 +2380,7 @@ export async function hybridSearch(
     ...(adaptiveDecision ? { adaptive_return: adaptiveDecision } : {}),
     ...(autocutDecision ? { autocut: autocutDecision } : {}),
     ...(relationalSlotDecision ? { relational_evidence_slot: relationalSlotDecision } : {}),
+    ...(relationalRerankPin ? { relational_rerank_pin: relationalRerankPin } : {}),
   });
   return budgeted;
 }
@@ -2481,6 +2499,8 @@ export async function hybridSearchCached(
       // Same normalizer as the inner search so both resolutions agree
       // (an invalid per-call value must hash as legacy, never as `evb=NaN`).
       expansion_variant_budget: normalizeExpansionVariantBudget(opts?.expansionVariantBudget),
+      // Ranker wave — threaded here too so knobsHash's `rrp=` part reflects the per-call pin.
+      relational_rerank_pin: normalizeRelationalRerankPin(opts?.relationalRerankPin),
     },
   });
   // v0.36 (D8 / CDX-2 + codex /ship #4): resolve column for the cache

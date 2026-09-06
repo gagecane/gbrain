@@ -8888,3 +8888,24 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
   v0.47.10.0 doc audit — `docs/guides/bootstrap.md`'s Postgres row and
   `docs/guides/ambient-writeback.md` were corrected to the engine-uniform
   truth; this is the remaining code-side echo. **Effort:** S.
+
+- [ ] **P2 — relational rerank pin: gate the pin on arm confidence, not just
+  arm firing.** **What:** `pinRelationalRows` (`src/core/search/relational-rerank-pin.ts`)
+  re-pins up to `search.relational_rerank_pin` relational-arm rows above the
+  reranked text rows whenever the arm fired. The arm's only confidence gate
+  today is tier-1 (a `fallback_slugify`-resolved seed never fires); the tier-2
+  resolution-margin gate (`relational-recall.ts` header) is still a TODO, so
+  a seed that resolves to the WRONG real page, or edges that are stale, now
+  put up to `max` wrong pages at ranks 1..max instead of one at `limit`
+  (the #3995 slot's blast radius). **Why:** the R1 receipt proves the pin on
+  a corpus whose edges are all correct; production brains have extractor
+  edges. Candidates: (a) pin only rows whose `relational_hop === 1` or whose
+  edge type matches the parsed relation (`relational_via_link_types ∩
+  parsed.linkTypes`), leaving multi-hop / off-type rows to the reranker;
+  (b) thread the seed's resolution margin into `RelationalArmMeta` and pin
+  only above a margin floor; (c) an R1-style paired A/B on a brain with
+  extractor edges (`scripts/r1-namedthing-rerank-ab.ts --relational`
+  generalized to a real source) before raising the default above 3.
+  **Context:** filed from the ranker wave R1 fix (v0.48.3.0); the per-brain
+  opt-out is `gbrain config set search.relational_rerank_pin off`. **Effort:** M.
+

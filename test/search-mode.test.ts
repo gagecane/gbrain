@@ -86,6 +86,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       // v0.43 — relational recall OFF for conservative.
       relationalRetrieval: false,
       relational_retrieval_depth: 2,
+      // ranker wave (R1) — relational rerank pin, 3 in every bundle (0 = off).
+      relational_rerank_pin: 3,
     });
   });
 
@@ -123,6 +125,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       // v0.43 — relational recall ON for balanced.
       relationalRetrieval: true,
       relational_retrieval_depth: 2,
+      // ranker wave (R1) — relational rerank pin, 3 in every bundle (0 = off).
+      relational_rerank_pin: 3,
     });
   });
 
@@ -158,6 +162,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       // v0.43 — relational recall ON for tokenmax.
       relationalRetrieval: true,
       relational_retrieval_depth: 2,
+      // ranker wave (R1) — relational rerank pin, 3 in every bundle (0 = off).
+      relational_rerank_pin: 3,
     });
   });
 
@@ -462,6 +468,8 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // fused rows for identical knobs; version-only invalidation.
     // 28→29: evb= expansion variant budget fold (ranker wave) — budget-weighted
     // variant fusion reorders rows for identical knobs; null hashes as legacy.
+    // v=29 ALSO carries rrp= (relational rerank pin, ranker wave R1) — same
+    // epoch, no extra bump: neither part had shipped in a release yet.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
@@ -494,6 +502,8 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // version-only invalidation.
     // 28→29: evb= expansion variant budget fold (ranker wave) — budget-weighted
     // variant fusion reorders rows for identical knobs; null hashes as legacy.
+    // v=29 ALSO carries rrp= (relational rerank pin, ranker wave R1) — same
+    // epoch, no extra bump: neither part had shipped in a release yet.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
@@ -713,6 +723,8 @@ describe('v0.42.3.0 — autocut knobs', () => {
   test('KNOBS_HASH_VERSION is 29 (…; 25→26 salience/recency + intent_patterns fold #4415; 26→27 adaptive-return gate + intent fold E5b/F11; 27→28 compiledTruthBoost synthetic-row suppression #4256; 28→29 evb= expansion variant budget fold)', () => {
     // 28→29: evb= expansion variant budget fold (ranker wave) — budget-weighted
     // variant fusion reorders rows for identical knobs; null hashes as legacy.
+    // v=29 ALSO carries rrp= (relational rerank pin, ranker wave R1) — same
+    // epoch, no extra bump: neither part had shipped in a release yet.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
@@ -997,5 +1009,55 @@ describe('ranker wave — expansion_variant_budget knob (null = legacy weighting
     expect(half).not.toBe(legacy);
     expect(one).not.toBe(legacy);
     expect(one).not.toBe(half);
+  });
+});
+
+describe('ranker wave (R1) — relational_rerank_pin knob (relational rows bypass reranker demotion)', () => {
+  test('every bundle pins 3 (the R1 receipt fix rides the default path — conservative has no reranker, so it is a no-op there)', () => {
+    for (const m of SEARCH_MODES) {
+      expect(MODE_BUNDLES[m].relational_rerank_pin).toBe(3);
+    }
+  });
+
+  test('loadOverridesFromConfig parses a non-negative integer <= 10 and the off literal', () => {
+    expect(loadOverridesFromConfig({ 'search.relational_rerank_pin': '0' }).relational_rerank_pin).toBe(0);
+    expect(loadOverridesFromConfig({ 'search.relational_rerank_pin': '5' }).relational_rerank_pin).toBe(5);
+    expect(loadOverridesFromConfig({ 'search.relational_rerank_pin': '10' }).relational_rerank_pin).toBe(10);
+    expect(loadOverridesFromConfig({ 'search.relational_rerank_pin': 'off' }).relational_rerank_pin).toBe(0);
+    expect(loadOverridesFromConfig({ 'search.relational_rerank_pin': 'OFF' }).relational_rerank_pin).toBe(0);
+    expect(loadOverridesFromConfig({ 'search.relational_rerank_pin': 'false' }).relational_rerank_pin).toBe(0);
+  });
+
+  test('out-of-range / non-integer / garbage values are ignored (fall through to the bundle)', () => {
+    for (const bad of ['11', '-1', '2.5', 'x', '', 'true']) {
+      expect(loadOverridesFromConfig({ 'search.relational_rerank_pin': bad })).not.toHaveProperty('relational_rerank_pin');
+    }
+    expect(loadOverridesFromConfig({})).not.toHaveProperty('relational_rerank_pin');
+    expect(resolveSearchMode({ mode: 'balanced', overrides: loadOverridesFromConfig({ 'search.relational_rerank_pin': '11' }) }).relational_rerank_pin).toBe(3);
+  });
+
+  test('resolution chain: per-call > config override > bundle (an explicit 0 override is honored, not skipped)', () => {
+    expect(resolveSearchMode({ mode: 'balanced', overrides: { relational_rerank_pin: 0 } }).relational_rerank_pin).toBe(0);
+    expect(resolveSearchMode({ mode: 'balanced', overrides: { relational_rerank_pin: 0 }, perCall: { relational_rerank_pin: 5 } }).relational_rerank_pin).toBe(5);
+    expect(resolveSearchMode({ mode: 'balanced', overrides: { relational_rerank_pin: 1 }, perCall: {} }).relational_rerank_pin).toBe(1);
+    expect(attributeKnob('relational_rerank_pin', { mode: 'balanced', overrides: { relational_rerank_pin: 0 } }, resolveSearchMode({ mode: 'balanced', overrides: { relational_rerank_pin: 0 } })).source).toBe('override');
+    expect(attributeKnob('relational_rerank_pin', { mode: 'balanced' }, resolveSearchMode({ mode: 'balanced' })).source).toBe('mode');
+  });
+
+  test('SEARCH_MODE_CONFIG_KEYS carries the key (modes --reset clears it)', () => {
+    expect(SEARCH_MODE_CONFIG_KEYS).toContain('search.relational_rerank_pin');
+  });
+
+  test('knobsHash folds the pin (rrp=): 3 vs 0 vs 1 all differ; explicit 3 equals the bundle default', () => {
+    const dflt = knobsHash(resolveSearchMode({ mode: 'balanced' }));
+    const three = knobsHash(resolveSearchMode({ mode: 'balanced', overrides: { relational_rerank_pin: 3 } }));
+    const off = knobsHash(resolveSearchMode({ mode: 'balanced', overrides: { relational_rerank_pin: 0 } }));
+    const one = knobsHash(resolveSearchMode({ mode: 'balanced', perCall: { relational_rerank_pin: 1 } }));
+    expect(three).toBe(dflt);
+    expect(off).not.toBe(dflt);
+    expect(one).not.toBe(dflt);
+    expect(one).not.toBe(off);
+    // The pin rides KNOBS_HASH_VERSION 29 together with evb= — no separate bump.
+    expect(KNOBS_HASH_VERSION).toBe(29);
   });
 });

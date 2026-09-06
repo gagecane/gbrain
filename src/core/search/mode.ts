@@ -32,6 +32,7 @@ import { getRecipe } from '../ai/recipes/index.ts';
 // resolve through DEFAULT_RERANKER_MODEL (voyage:rerank-2.5 since v0.48.2).
 import { DEFAULT_RERANKER_MODEL } from '../ai/defaults.ts';
 import { normalizeExpansionVariantBudget } from './fusion-lists.ts';
+import { DEFAULT_RELATIONAL_RERANK_PIN, normalizeRelationalRerankPin } from './relational-rerank-pin.ts';
 
 /**
  * Look up the `reranker.default_timeout_ms` declared by the resolved
@@ -348,6 +349,24 @@ export interface ModeBundle {
   relationalRetrieval: boolean;
   /** v0.43 — max hops for relational traversal. Default 2, hard-capped at 3. */
   relational_retrieval_depth: number;
+  /**
+   * Ranker wave (R1 receipt) — relational-arm rows bypass reranker DEMOTION.
+   * After the cross-encoder reorders the pool, up to this many relational-arm
+   * rows are re-pinned above the reranked text rows in their fused (RRF)
+   * order (a permutation; one row per page; a row the reranker itself ranked
+   * higher keeps that position). The cross-encoder scores chunk TEXT, and an
+   * edge-derived answer's text need not mention the query's entity, so it
+   * demotes exactly the rows the arm exists to surface: NamedThingBench
+   * relational fixture, balanced default, hit@1 21/39 → 3/39 and hit@3
+   * 27/39 → 5/39 with the reranker on (scripts/r1-namedthing-rerank-ab.ts).
+   * `0` disables (pre-pin ranking); range [0, 10] via the ONE contract
+   * `normalizeRelationalRerankPin` (relational-rerank-pin.ts). No-op for
+   * non-relational queries, when the reranker did not reorder (off / fail-open),
+   * and for image modality. Override: per-call SearchOpts.relationalRerankPin →
+   * `search.relational_rerank_pin` config → bundle. Pinned rows survive
+   * autocut (`relational_pinned` stamp) and are excluded from its cliff math.
+   */
+  relational_rerank_pin: number;
 }
 
 /**
@@ -403,6 +422,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // matches graph_signals posture). Power users opt in per-call.
     relationalRetrieval: false,
     relational_retrieval_depth: 2,
+    // Ranker wave (R1) — relational rows re-pinned above reranked text rows (0 = off).
+    relational_rerank_pin: DEFAULT_RELATIONAL_RERANK_PIN,
     autocut_jump: 0.2,
     autocut_min_top: 0.35,
     autocut_min_keep: 1,
@@ -467,6 +488,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // ships default-false everywhere if the gate flags any regression).
     relationalRetrieval: true,
     relational_retrieval_depth: 2,
+    // Ranker wave (R1) — relational rows re-pinned above reranked text rows (0 = off).
+    relational_rerank_pin: DEFAULT_RELATIONAL_RERANK_PIN,
     autocut_jump: 0.2,
     autocut_min_top: 0.35,
     autocut_min_keep: 1,
@@ -523,6 +546,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // v0.43 — relational recall ON for tokenmax (max-recall tier).
     relationalRetrieval: true,
     relational_retrieval_depth: 2,
+    // Ranker wave (R1) — relational rows re-pinned above reranked text rows (0 = off).
+    relational_rerank_pin: DEFAULT_RELATIONAL_RERANK_PIN,
     autocut_jump: 0.2,
     autocut_min_top: 0.35,
     autocut_min_keep: 1,
@@ -583,6 +608,7 @@ export interface SearchKeyOverrides {
   // v0.43 — relational recall overrides.
   relationalRetrieval?: boolean;
   relational_retrieval_depth?: number;
+  relational_rerank_pin?: number;
   autocut_jump?: number;
   autocut_min_top?: number;
   autocut_min_keep?: number;
@@ -641,6 +667,8 @@ export interface SearchPerCallOpts {
   // v0.43 — relational recall per-call overrides.
   relationalRetrieval?: boolean;
   relational_retrieval_depth?: number;
+  // Ranker wave — relational rerank pin per-call override (0 = off; [0, 10]).
+  relational_rerank_pin?: number;
 }
 
 /**
@@ -741,6 +769,7 @@ export function resolveSearchMode(input: ResolveSearchModeInput): ResolvedSearch
     // v0.43 — relational recall resolved via the same pick chain.
     relationalRetrieval: pick('relationalRetrieval'),
     relational_retrieval_depth: pick('relational_retrieval_depth'),
+    relational_rerank_pin: pick('relational_rerank_pin'),
     resolved_mode,
     mode_valid: valid,
   };
@@ -997,6 +1026,13 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // the key (append-only, last part). A budget-weighted write (variant lists
 // subordinated in RRF) must not serve a legacy lookup or a different budget;
 // `null` hashes as `evb=legacy` so the all-null bundles re-key exactly once.
+//
+// v=29 ALSO carries `rrp=` (ranker wave, same release — one bump per wave):
+// the relational_rerank_pin knob. Pinning relational-arm rows above the
+// reranked text rows reorders the cached page for identical other knobs, so
+// a pin-3 write must never serve a pin-0 lookup (and vice versa). Appended as
+// the last part with NO separate version bump: v=29 has not shipped in a
+// release yet, so `evb=` and `rrp=` ride the same 28→29 one-time cold miss.
 export const KNOBS_HASH_VERSION = 29;
 
 /**
@@ -1261,6 +1297,11 @@ export function knobsHash(
     // identical knobs, so a budget write must never serve a legacy lookup.
     // `== null` (not `=== null`) keeps a partial-knobs literal hashing as legacy.
     `evb=${knobs.expansion_variant_budget == null ? 'legacy' : knobs.expansion_variant_budget.toFixed(3)}`,
+    // v=29 addition (ranker wave, append-only): relational rerank pin. The
+    // pin permutes the post-rerank pool (relational rows to the top), so a
+    // pin-3 write must never serve a pin-0 lookup. A partial-knobs literal
+    // without the field hashes as the bundle default.
+    `rrp=${knobs.relational_rerank_pin ?? DEFAULT_RELATIONAL_RERANK_PIN}`,
   ];
   const h = createHash('sha256');
   h.update(parts.join('|'));
@@ -1475,6 +1516,15 @@ export function loadOverridesFromConfig(
     const n = parseInt(reld, 10);
     if (Number.isFinite(n) && n >= 1 && n <= 3) out.relational_retrieval_depth = n;
   }
+  // Ranker wave — relational rerank pin: `off`/`0` disables, a non-negative
+  // integer <= 10 is the pinned-row cap; anything else falls through to the
+  // bundle. ONE range contract with the per-call seams in hybrid.ts:
+  // normalizeRelationalRerankPin (relational-rerank-pin.ts).
+  const rrp = get('search.relational_rerank_pin');
+  if (rrp !== undefined) {
+    const n = normalizeRelationalRerankPin(rrp);
+    if (n !== undefined) out.relational_rerank_pin = n;
+  }
 
   return out;
 }
@@ -1520,6 +1570,8 @@ export const SEARCH_MODE_CONFIG_KEYS: ReadonlyArray<string> = Object.freeze([
   // v0.43 relational recall
   'search.relational_retrieval',
   'search.relational_retrieval_depth',
+  // Ranker wave (R1) relational rerank pin
+  'search.relational_rerank_pin',
   'search.autocut_jump',
   'search.autocut_min_top',
   'search.autocut_min_keep',

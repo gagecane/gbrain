@@ -25,6 +25,7 @@ The bundles are frozen in `src/core/search/mode.ts` (`MODE_BUNDLES`):
 | `expansion` (LLM multi-query) | false          | false      | **true**       |
 | `expansion_variant_budget`    | `null` (legacy) | `null` (legacy) | `null` (legacy) |
 | `relationalRetrieval`         | false          | **true**   | **true**       |
+| `relational_rerank_pin`       | 3              | 3          | 3              |
 | `searchLimit` default         | 10             | 25         | 50             |
 | `reranker` (cross-encoder)    | off            | `voyage:rerank-2.5` | `voyage:rerank-2.5` |
 | `autocut` (rerank-cliff cut)  | off            | on (0.35)  | on (0.35)      |
@@ -35,7 +36,7 @@ The bundles are frozen in `src/core/search/mode.ts` (`MODE_BUNDLES`):
 - **`tokenmax`** — no token budget, LLM query expansion on, 50 results.
   Pairs with an expensive downstream model you want fully fed.
 
-Four of the knobs deserve a sentence:
+Five of the knobs deserve a sentence:
 
 - **`expansion`** rewrites your query into multiple variants via a cheap
   LLM call per search (adds roughly $1.50 per 1K queries) — better recall,
@@ -57,6 +58,20 @@ Four of the knobs deserve a sentence:
   questions ("who invested in X", "what connects A and B"); it's a pure
   no-op for non-relational queries. The `query` op's `relational` flag
   forces it on/off per call.
+- **`relational_rerank_pin`** (config key `search.relational_rerank_pin`;
+  3 in every bundle) keeps those graph-walk answers from being buried by the
+  cross-encoder reranker: the reranker scores page TEXT, and an edge-derived
+  answer's text need not mention the entity you asked about, so on the
+  relational benchmark the reranker alone dropped hit@1 from 21/39 to 3/39.
+  After the reranker runs, up to this many relational-arm rows are pinned back
+  above the reranked text rows in their fused order; `0`/`off` restores the
+  pre-pin ranking. A pure no-op for non-relational queries and whenever the
+  reranker is off or failed open. It trusts the graph — if your edges are
+  stale, an edge answer now sits at the top rather than at the end of page 1.
+  **Say to your agent:** *"Stop pinning graph answers above the reranked
+  results"* (no skill backs this; your agent runs
+  `gbrain config set search.relational_rerank_pin off`, and
+  `gbrain config set search.relational_rerank_pin 3` restores the default).
 - **`keywordOrFallback`** (on in every mode; config key
   `search.keywordOrFallback`) relaxes the keyword and title arms from AND
   to OR when strict AND matching finds nothing, so a multi-word query still

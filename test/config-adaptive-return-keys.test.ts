@@ -37,6 +37,15 @@ describe('ranker wave — search.expansion_variant_budget is registered (config 
   });
 });
 
+describe('ranker wave (R1) — search.relational_rerank_pin is registered (config plane is not a no-op)', () => {
+  // mode.ts reads it in loadOverridesFromConfig; without this row
+  // `gbrain config set search.relational_rerank_pin off` (the documented
+  // opt-out for the relational rerank pin) is rejected.
+  test('search.relational_rerank_pin is in KNOWN_CONFIG_KEYS', () => {
+    expect(KNOWN_CONFIG_KEYS).toContain('search.relational_rerank_pin');
+  });
+});
+
 describe('GBRAIN_RETRIEVAL_REFLEX_VOLUNTEER loadConfig env fold (ship review)', () => {
   // volunteerEnabled() reads env directly (config-less-environment escape
   // hatch, tested in reflex-volunteer.test.ts); this pins the SEPARATE
