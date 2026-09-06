@@ -60,6 +60,8 @@ import { normalizeAlias } from './alias-normalize.ts';
 import { stampEvidence, markKeywordHits } from './evidence.ts';
 import { applyExactLookupTier } from './exact-lookup.ts';
 import { pinRelationalRows, normalizeRelationalRerankPin, type RelationalRerankPinDecision } from './relational-rerank-pin.ts';
+import { normalizeKeywordArmConfidenceFloor, type KeywordArmConfidenceDecision } from './arm-confidence.ts';
+import { parseRelationalQuery } from './relational-intent.ts';
 import { expandAnchors, hydrateChunks } from './two-pass.ts';
 import { enforceTokenBudget, searchSalvageEnabled, type TokenBudgetMeta } from './token-budget.ts';
 import { warnOncePerProcess } from '../utils.ts';
@@ -983,6 +985,15 @@ export interface HybridSearchOpts extends SearchOpts {
    * hash reflects it); eval budget sweeps drive it here.
    */
   expansionVariantBudget?: number | null;
+  /**
+   * Per-call override for `search.keyword_arm_confidence_floor` — below this
+   * scale-free keyword-arm confidence the keyword + title lists fuse at half
+   * weight (arm-confidence.ts). `undefined` → config/bundle; `null` forces
+   * off. Range (0, 1]; anything else is unset via the ONE contract
+   * `normalizeKeywordArmConfidenceFloor`. Threaded through resolveSearchMode
+   * in BOTH the inner search and the cache resolver (knobs hash `kacf=`).
+   */
+  keywordArmConfidenceFloor?: number | null;
   /** Override default RRF K constant (default: 60). Lower values boost top-ranked results more. */
   rrfK?: number;
   /** Override dedup pipeline parameters. */
@@ -1243,6 +1254,8 @@ export async function hybridSearch(
       // Ranker wave (R1) — relational rerank pin per-call thread-through (eval
       // A/B); normalized through the ONE range contract (relational-rerank-pin.ts).
       relational_rerank_pin: normalizeRelationalRerankPin(opts?.relationalRerankPin),
+      // Ranker wave (Phase E2) — keyword-arm confidence floor per-call thread-through.
+      keyword_arm_confidence_floor: normalizeKeywordArmConfidenceFloor(opts?.keywordArmConfidenceFloor),
     },
   });
 
@@ -2084,14 +2097,24 @@ export async function hybridSearch(
   // fallback path). Expansion variant/clause arms share the resolved
   // `expansion_variant_budget` (per-call → config → bundle) as total RRF
   // weight (`weight / (k + rank)`); null = legacy weight 1 on every list.
+  // Phase E2 (Cat 13): the keyword + title lists fuse at half weight when
+  // the keyword arm is weak (arm-confidence.ts) — non-relational queries
+  // with a voting text vector arm only; the decision is stamped on meta
+  // (`keyword_arm_confidence`) even with the floor off, for calibration.
+  let keywordArmConfidence: KeywordArmConfidenceDecision | undefined;
   const allLists: FusionListEntry[] = composeFusionLists({
     arms: vectorArms,
     keywordFusionList,
     titleFusionList,
     relationalList,
     includeRelational: effectiveModality !== 'image',
+    relationalQuery: parseRelationalQuery(query) !== null,
+    onKeywordArmConfidence: (d) => { keywordArmConfidence = d; },
     ks: { vectorK, textRrfK, imageRrfK, keywordK, baseRrfK },
-    knobs: { expansionVariantBudget: resolvedMode.expansion_variant_budget },
+    knobs: {
+      expansionVariantBudget: resolvedMode.expansion_variant_budget,
+      keywordArmConfidenceFloor: resolvedMode.keyword_arm_confidence_floor,
+    },
   });
 
   // issue #160: stamp unverified auto-extracted stubs across ALL candidate
@@ -2381,6 +2404,7 @@ export async function hybridSearch(
     ...(autocutDecision ? { autocut: autocutDecision } : {}),
     ...(relationalSlotDecision ? { relational_evidence_slot: relationalSlotDecision } : {}),
     ...(relationalRerankPin ? { relational_rerank_pin: relationalRerankPin } : {}),
+    ...(keywordArmConfidence ? { keyword_arm_confidence: keywordArmConfidence } : {}),
   });
   return budgeted;
 }
@@ -2501,6 +2525,8 @@ export async function hybridSearchCached(
       expansion_variant_budget: normalizeExpansionVariantBudget(opts?.expansionVariantBudget),
       // Ranker wave — threaded here too so knobsHash's `rrp=` part reflects the per-call pin.
       relational_rerank_pin: normalizeRelationalRerankPin(opts?.relationalRerankPin),
+      // Ranker wave (Phase E2) — threaded here too so knobsHash's `kacf=` part reflects the per-call floor.
+      keyword_arm_confidence_floor: normalizeKeywordArmConfidenceFloor(opts?.keywordArmConfidenceFloor),
     },
   });
   // v0.36 (D8 / CDX-2 + codex /ship #4): resolve column for the cache

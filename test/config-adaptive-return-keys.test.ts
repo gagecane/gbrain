@@ -46,6 +46,16 @@ describe('ranker wave (R1) — search.relational_rerank_pin is registered (confi
   });
 });
 
+describe('ranker wave (Phase E2) — search.keyword_arm_confidence_floor is registered (config plane is not a no-op)', () => {
+  // mode.ts reads it in loadOverridesFromConfig; without this row
+  // `gbrain config set search.keyword_arm_confidence_floor 0.6` (the Cat 13
+  // arm-confidence fusion knob) is rejected and the documented knob is
+  // unreachable — the exact E5a regression class.
+  test('search.keyword_arm_confidence_floor is in KNOWN_CONFIG_KEYS', () => {
+    expect(KNOWN_CONFIG_KEYS).toContain('search.keyword_arm_confidence_floor');
+  });
+});
+
 describe('GBRAIN_RETRIEVAL_REFLEX_VOLUNTEER loadConfig env fold (ship review)', () => {
   // volunteerEnabled() reads env directly (config-less-environment escape
   // hatch, tested in reflex-volunteer.test.ts); this pins the SEPARATE

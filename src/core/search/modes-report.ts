@@ -59,6 +59,8 @@ export const KNOB_DESCRIPTIONS: Record<keyof ModeBundle, string> = {
   relationalRetrieval: 'Typed-edge relational recall arm (relational queries walk the graph; no-op otherwise)',
   relational_retrieval_depth: 'Max hops for relational traversal (1..3, 2 default)',
   relational_rerank_pin: 'Relational-arm rows re-pinned above reranked text rows in fused order (0 = off; 0..10, 3 default)',
+  // Ranker wave (Phase E2) arm-confidence fusion
+  keyword_arm_confidence_floor: 'Keyword-arm confidence floor: below this margin ratio the keyword + title lists fuse at half weight (null = off; (0, 1])',
 };
 
 /**
@@ -71,6 +73,7 @@ export const KNOB_DESCRIPTIONS: Record<keyof ModeBundle, string> = {
 export const KNOB_NULL_LABELS: Partial<Record<keyof ModeBundle, string>> = {
   expansion_variant_budget: 'legacy (null)',
   reranker_top_n_out: 'no truncate (null)',
+  keyword_arm_confidence_floor: 'off (null)',
 };
 
 /** Render one resolved knob value for the human `gbrain search modes` table. */

@@ -96,6 +96,8 @@ describe('KNOBS_HASH_VERSION + version invariants', () => {
     // variant fusion reorders rows for identical knobs; null hashes as legacy.
     // v=29 ALSO carries rrp= (relational rerank pin, ranker wave R1) — same
     // epoch, no extra bump: neither part had shipped in a release yet.
+    // v=29 ALSO carries kacf= (keyword-arm confidence floor, ranker wave
+    // Phase E2 / Cat 13) — same unshipped epoch; null hashes as off.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
@@ -297,5 +299,17 @@ describe('ranker wave (R1): relational_rerank_pin participates in the hash (rrp=
     expect(new Set([three, off, one]).size).toBe(3);
     const { relational_rerank_pin: _drop, ...partial } = baseKnobs();
     expect(knobsHash(partial as ResolvedSearchKnobs)).toBe(three);
+  });
+});
+
+describe('ranker wave (Phase E2): keyword_arm_confidence_floor participates in the hash (kacf=)', () => {
+  test('off (bundle null) vs 0.6 vs 0.5 → three distinct hashes; a partial-knobs literal hashes as off', () => {
+    const off = knobsHash({ ...baseKnobs(), keyword_arm_confidence_floor: null });
+    const six = knobsHash({ ...baseKnobs(), keyword_arm_confidence_floor: 0.6 });
+    const five = knobsHash({ ...baseKnobs(), keyword_arm_confidence_floor: 0.5 });
+    expect(new Set([off, six, five]).size).toBe(3);
+    expect(knobsHash(baseKnobs())).toBe(off);
+    const { keyword_arm_confidence_floor: _drop, ...partial } = baseKnobs();
+    expect(knobsHash(partial as ResolvedSearchKnobs)).toBe(off);
   });
 });

@@ -1340,6 +1340,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.expansion_variant_budget',
   // Ranker wave (R1): relational-arm rows re-pinned above reranked text rows (mode.ts reads; `off` | 0..10).
   'search.relational_rerank_pin',
+  // Ranker wave (Phase E2): keyword-arm confidence floor — weak keyword arm fuses at half weight (mode.ts reads; `off` | (0, 1]).
+  'search.keyword_arm_confidence_floor',
   'search.crag_escalation',
   'search.crag_think',
   // Models tier system (v0.31.12)

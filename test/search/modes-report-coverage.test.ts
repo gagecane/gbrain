@@ -48,12 +48,27 @@ describe('#4604 buildModesReport — full-bundle knob coverage', () => {
       'relationalRetrieval',
       'relational_retrieval_depth',
       'relational_rerank_pin',
+      'keyword_arm_confidence_floor',
       'graph_signals',
       'autocut',
       'title_boost',
     ] as const) {
       expect(report.resolved[k]).toBeDefined();
     }
+  });
+
+  test('ranker wave (Phase E2): keyword_arm_confidence_floor resolves to null (off) from the bundle and attributes a 0.6 / off override', async () => {
+    const dflt = await buildModesReport(stubEngine({ 'search.mode': 'balanced' }));
+    expect(dflt.resolved.keyword_arm_confidence_floor.value).toBeNull();
+    expect(dflt.resolved.keyword_arm_confidence_floor.source).toBe('mode');
+    const six = await buildModesReport(stubEngine({ 'search.keyword_arm_confidence_floor': '0.6' }));
+    expect(six.resolved.keyword_arm_confidence_floor.value).toBe(0.6);
+    expect(six.resolved.keyword_arm_confidence_floor.source).toBe('override');
+    const off = await buildModesReport(stubEngine({ 'search.keyword_arm_confidence_floor': 'off' }));
+    expect(off.resolved.keyword_arm_confidence_floor.value).toBeNull();
+    expect(off.resolved.keyword_arm_confidence_floor.source).toBe('override');
+    expect(searchCmd.formatModesText(off)).toMatch(/keyword_arm_confidence_floor\s+= off \(null\)\s+\[/);
+    expect(searchCmd.formatModesText(six)).toMatch(/keyword_arm_confidence_floor\s+= 0\.6\s+\[/);
   });
 
   test('ranker wave (R1): relational_rerank_pin resolves to 3 from the bundle and attributes an off override', async () => {
@@ -90,6 +105,7 @@ describe('formatKnobValue — a legitimate null is not "(undefined)" (adversaria
   test('null renders distinctly per knob; undefined keeps "(undefined)"; values stringify', () => {
     expect(formatKnobValue('expansion_variant_budget', null)).toBe('legacy (null)');
     expect(formatKnobValue('reranker_top_n_out', null)).toBe('no truncate (null)');
+    expect(formatKnobValue('keyword_arm_confidence_floor', null)).toBe('off (null)');
     expect(formatKnobValue('tokenBudget', null)).toBe('(null)');
     expect(formatKnobValue('tokenBudget', undefined)).toBe('(undefined)');
     expect(formatKnobValue('expansion_variant_budget', undefined)).toBe('(undefined)');

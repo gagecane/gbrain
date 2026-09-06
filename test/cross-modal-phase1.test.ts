@@ -213,6 +213,8 @@ describe('D2 — knobsHash differs across cross-modal knob values', () => {
     // version-only invalidation.
     // 28→29: evb= expansion variant budget fold (ranker wave) — budget-weighted
     // variant fusion reorders rows for identical knobs; null hashes as legacy.
+    // v=29 ALSO carries rrp= (relational rerank pin, R1) and kacf= (keyword-arm
+    // confidence floor, Phase E2 / Cat 13) — same unshipped epoch, no extra bump.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 

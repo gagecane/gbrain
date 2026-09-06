@@ -88,6 +88,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       relational_retrieval_depth: 2,
       // ranker wave (R1) — relational rerank pin, 3 in every bundle (0 = off).
       relational_rerank_pin: 3,
+      // ranker wave (Phase E2) — keyword-arm confidence floor OFF in every bundle until the Cat 13 receipt.
+      keyword_arm_confidence_floor: null,
     });
   });
 
@@ -127,6 +129,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       relational_retrieval_depth: 2,
       // ranker wave (R1) — relational rerank pin, 3 in every bundle (0 = off).
       relational_rerank_pin: 3,
+      // ranker wave (Phase E2) — keyword-arm confidence floor OFF in every bundle until the Cat 13 receipt.
+      keyword_arm_confidence_floor: null,
     });
   });
 
@@ -164,6 +168,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       relational_retrieval_depth: 2,
       // ranker wave (R1) — relational rerank pin, 3 in every bundle (0 = off).
       relational_rerank_pin: 3,
+      // ranker wave (Phase E2) — keyword-arm confidence floor OFF in every bundle until the Cat 13 receipt.
+      keyword_arm_confidence_floor: null,
     });
   });
 
@@ -470,6 +476,8 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // variant fusion reorders rows for identical knobs; null hashes as legacy.
     // v=29 ALSO carries rrp= (relational rerank pin, ranker wave R1) — same
     // epoch, no extra bump: neither part had shipped in a release yet.
+    // v=29 ALSO carries kacf= (keyword-arm confidence floor, ranker wave
+    // Phase E2 / Cat 13) — same unshipped epoch; null hashes as off.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
@@ -504,6 +512,8 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // variant fusion reorders rows for identical knobs; null hashes as legacy.
     // v=29 ALSO carries rrp= (relational rerank pin, ranker wave R1) — same
     // epoch, no extra bump: neither part had shipped in a release yet.
+    // v=29 ALSO carries kacf= (keyword-arm confidence floor, ranker wave
+    // Phase E2 / Cat 13) — same unshipped epoch; null hashes as off.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
@@ -725,6 +735,8 @@ describe('v0.42.3.0 — autocut knobs', () => {
     // variant fusion reorders rows for identical knobs; null hashes as legacy.
     // v=29 ALSO carries rrp= (relational rerank pin, ranker wave R1) — same
     // epoch, no extra bump: neither part had shipped in a release yet.
+    // v=29 ALSO carries kacf= (keyword-arm confidence floor, ranker wave
+    // Phase E2 / Cat 13) — same unshipped epoch; null hashes as off.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 

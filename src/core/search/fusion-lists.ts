@@ -36,11 +36,24 @@
  *   - keyword list at `keywordK`; title list at `keywordK` only if non-empty;
  *     relational list at `baseRrfK` only if `includeRelational` && non-empty.
  *
+ * Arm-confidence weighting of the LEXICAL arms (arm-confidence.ts, Cat 13):
+ *   - when `keywordArmConfidenceFloor` is set, the keyword list is non-empty,
+ *     a TEXT vector arm voted, the query is not relational, and the keyword
+ *     arm's scale-free `margin_ratio` is below the floor, the keyword AND
+ *     title entries carry `weight: 0.5` (`KEYWORD_ARM_WEAK_WEIGHT`);
+ *   - otherwise (floor `null`/unset = every bundle today) those entries are
+ *     emitted without a `weight` key — byte-identical to the pre-knob output.
+ *   - `onKeywordArmConfidence` fires ONCE per composition with the decision
+ *     (margin_ratio, top_score, downweighted) — always, even when the knob is
+ *     off — so hybrid.ts can stamp `HybridSearchMeta.keyword_arm_confidence`
+ *     and an operator can calibrate the floor with the knob off.
+ *
  * Pure: no engine, no IO, deterministic; unit-tested in
- * test/search/fusion-lists.test.ts.
+ * test/search/fusion-lists.test.ts + test/search/arm-confidence.test.ts.
  */
 
 import type { SearchResult } from '../types.ts';
+import { decideKeywordArmWeight, type KeywordArmConfidenceDecision } from './arm-confidence.ts';
 
 export type VectorArmRole = 'original' | 'variant' | 'clause' | 'image';
 
@@ -87,6 +100,11 @@ export interface FusionKs {
 export interface FusionKnobs {
   /** `search.expansion_variant_budget`: null = legacy (weight 1 everywhere). */
   expansionVariantBudget: number | null;
+  /**
+   * `search.keyword_arm_confidence_floor`: null/undefined = off (keyword +
+   * title entries carry no `weight` key). See arm-confidence.ts.
+   */
+  keywordArmConfidenceFloor?: number | null;
 }
 
 /** Inclusive upper bound of the `expansion_variant_budget` range `(0, 4]`. */
@@ -128,6 +146,14 @@ export interface ComposeFusionListsInput {
   relationalList: SearchResult[];
   /** False on image-modality queries (the relational arm is text-only). */
   includeRelational: boolean;
+  /**
+   * True when the relational-intent parser matched the query. Gates the
+   * arm-confidence down-weight OFF (relational keyword evidence is
+   * entity-shaped, not paraphrase noise). Default false.
+   */
+  relationalQuery?: boolean;
+  /** Fires once with the arm-confidence decision (even when the knob is off). */
+  onKeywordArmConfidence?: (decision: KeywordArmConfidenceDecision) => void;
   ks: FusionKs;
   knobs: FusionKnobs;
 }
@@ -163,9 +189,24 @@ export function composeFusionLists(input: ComposeFusionListsInput): FusionListEn
       out.push({ list: arm.list, k: textK });
     }
   }
-  out.push({ list: keywordFusionList, k: ks.keywordK });
+  // Arm-confidence weighting (arm-confidence.ts): the keyword AND title
+  // lists share one decision, computed from the keyword list that actually
+  // fuses (post relaxed-row demotion). `weight` undefined → no key emitted.
+  const lexical = decideKeywordArmWeight({
+    keywordList: keywordFusionList,
+    floor: knobs.keywordArmConfidenceFloor ?? null,
+    vectorArmVoted: textArmsNonEmpty(arms),
+    relationalQuery: input.relationalQuery === true,
+  });
+  try {
+    input.onKeywordArmConfidence?.(lexical.decision);
+  } catch {
+    // Meta stamping must never break fusion.
+  }
+  const lexicalWeight = lexical.weight === undefined ? {} : { weight: lexical.weight };
+  out.push({ list: keywordFusionList, k: ks.keywordK, ...lexicalWeight });
   if (titleFusionList.length > 0) {
-    out.push({ list: titleFusionList, k: ks.keywordK });
+    out.push({ list: titleFusionList, k: ks.keywordK, ...lexicalWeight });
   }
   if (includeRelational && relationalList.length > 0) {
     out.push({ list: relationalList, k: ks.baseRrfK });

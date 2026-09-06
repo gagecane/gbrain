@@ -33,6 +33,7 @@ import { getRecipe } from '../ai/recipes/index.ts';
 import { DEFAULT_RERANKER_MODEL } from '../ai/defaults.ts';
 import { normalizeExpansionVariantBudget } from './fusion-lists.ts';
 import { DEFAULT_RELATIONAL_RERANK_PIN, normalizeRelationalRerankPin } from './relational-rerank-pin.ts';
+import { normalizeKeywordArmConfidenceFloor } from './arm-confidence.ts';
 
 /**
  * Look up the `reranker.default_timeout_ms` declared by the resolved
@@ -367,6 +368,27 @@ export interface ModeBundle {
    * autocut (`relational_pinned` stamp) and are excluded from its cliff math.
    */
   relational_rerank_pin: number;
+  /**
+   * Ranker wave (Phase E2, Cat 13) — arm-confidence-weighted fusion of the
+   * LEXICAL arms (arm-confidence.ts). When the keyword arm's scale-free
+   * confidence `margin_ratio = top / (top + second)` over its returned rows
+   * (1 for a single row, 0 when empty) is BELOW this floor, the keyword AND
+   * title lists fuse at weight 0.5 (k×2 in the old k-only form) — but only
+   * when a text vector arm voted and the query is not relational; never on
+   * the keyword-only fallback paths. `null` = off (byte-identical fusion).
+   * Receipt (Cat 13 conceptual recall, Voyage space voyage-4@1024, reranker
+   * off, autocut off): hybrid nDCG@5 53.0 on the held-out concepts vs bare
+   * vector 60.5 (P@1 48.1 vs 65.2); grep-only 52.2 — the keyword arm's noise
+   * on paraphrase probes drags the fused result below the vector arm.
+   * Every bundle lands at `null`; the Phase E2 receipt decides the flip, with
+   * the floor calibrated as the median `margin_ratio` (read from
+   * `HybridSearchMeta.keyword_arm_confidence` with the knob off) over
+   * tuning-split probes whose keyword top hit is NOT gold. Range `(0, 1]`
+   * via the ONE contract `normalizeKeywordArmConfidenceFloor`. Override:
+   * per-call SearchOpts.keywordArmConfidenceFloor →
+   * `search.keyword_arm_confidence_floor` config (`off` = null) → bundle.
+   */
+  keyword_arm_confidence_floor: number | null;
 }
 
 /**
@@ -427,6 +449,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     autocut_jump: 0.2,
     autocut_min_top: 0.35,
     autocut_min_keep: 1,
+    // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
+    keyword_arm_confidence_floor: null,
   }),
   balanced: Object.freeze({
     cache_enabled: true,
@@ -493,6 +517,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     autocut_jump: 0.2,
     autocut_min_top: 0.35,
     autocut_min_keep: 1,
+    // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
+    keyword_arm_confidence_floor: null,
   }),
   tokenmax: Object.freeze({
     cache_enabled: true,
@@ -551,6 +577,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     autocut_jump: 0.2,
     autocut_min_top: 0.35,
     autocut_min_keep: 1,
+    // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
+    keyword_arm_confidence_floor: null,
   }),
 });
 
@@ -609,6 +637,8 @@ export interface SearchKeyOverrides {
   relationalRetrieval?: boolean;
   relational_retrieval_depth?: number;
   relational_rerank_pin?: number;
+  // Ranker wave (Phase E2) — keyword-arm confidence floor override (null = off; (0, 1]).
+  keyword_arm_confidence_floor?: number | null;
   autocut_jump?: number;
   autocut_min_top?: number;
   autocut_min_keep?: number;
@@ -669,6 +699,8 @@ export interface SearchPerCallOpts {
   relational_retrieval_depth?: number;
   // Ranker wave — relational rerank pin per-call override (0 = off; [0, 10]).
   relational_rerank_pin?: number;
+  // Ranker wave (Phase E2) — keyword-arm confidence floor per-call override (null = off; (0, 1]).
+  keyword_arm_confidence_floor?: number | null;
 }
 
 /**
@@ -770,6 +802,7 @@ export function resolveSearchMode(input: ResolveSearchModeInput): ResolvedSearch
     relationalRetrieval: pick('relationalRetrieval'),
     relational_retrieval_depth: pick('relational_retrieval_depth'),
     relational_rerank_pin: pick('relational_rerank_pin'),
+    keyword_arm_confidence_floor: pick('keyword_arm_confidence_floor'),
     resolved_mode,
     mode_valid: valid,
   };
@@ -1033,6 +1066,12 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // a pin-3 write must never serve a pin-0 lookup (and vice versa). Appended as
 // the last part with NO separate version bump: v=29 has not shipped in a
 // release yet, so `evb=` and `rrp=` ride the same 28→29 one-time cold miss.
+//
+// v=29 ALSO carries `kacf=` (ranker wave Phase E2, same release): the
+// keyword_arm_confidence_floor knob. Down-weighting the keyword + title lists
+// on a weak keyword arm reorders the fused page for identical other knobs, so
+// a floor-0.6 write must never serve a floor-off lookup (and vice versa).
+// `null` hashes as `kacf=off`; appended after `rrp=`, same unshipped epoch.
 export const KNOBS_HASH_VERSION = 29;
 
 /**
@@ -1302,6 +1341,11 @@ export function knobsHash(
     // pin-3 write must never serve a pin-0 lookup. A partial-knobs literal
     // without the field hashes as the bundle default.
     `rrp=${knobs.relational_rerank_pin ?? DEFAULT_RELATIONAL_RERANK_PIN}`,
+    // v=29 addition (ranker wave Phase E2, append-only): keyword-arm
+    // confidence floor. A weak-arm down-weight reorders the fused page, so a
+    // floor write must never serve a floor-off lookup. `== null` keeps a
+    // partial-knobs literal (and the all-null bundles) hashing as `off`.
+    `kacf=${knobs.keyword_arm_confidence_floor == null ? 'off' : knobs.keyword_arm_confidence_floor.toFixed(3)}`,
   ];
   const h = createHash('sha256');
   h.update(parts.join('|'));
@@ -1525,6 +1569,16 @@ export function loadOverridesFromConfig(
     const n = normalizeRelationalRerankPin(rrp);
     if (n !== undefined) out.relational_rerank_pin = n;
   }
+  // Ranker wave (Phase E2) — keyword-arm confidence floor: the literal
+  // `off`/`null` pins the knob off (null); a number in (0, 1] is the floor;
+  // anything else falls through to the bundle. ONE range contract with the
+  // per-call seams in hybrid.ts: normalizeKeywordArmConfidenceFloor
+  // (arm-confidence.ts).
+  const kacf = get('search.keyword_arm_confidence_floor');
+  if (kacf !== undefined) {
+    const n = normalizeKeywordArmConfidenceFloor(kacf);
+    if (n !== undefined) out.keyword_arm_confidence_floor = n;
+  }
 
   return out;
 }
@@ -1572,6 +1626,8 @@ export const SEARCH_MODE_CONFIG_KEYS: ReadonlyArray<string> = Object.freeze([
   'search.relational_retrieval_depth',
   // Ranker wave (R1) relational rerank pin
   'search.relational_rerank_pin',
+  // Ranker wave (Phase E2) keyword-arm confidence floor
+  'search.keyword_arm_confidence_floor',
   'search.autocut_jump',
   'search.autocut_min_top',
   'search.autocut_min_keep',
