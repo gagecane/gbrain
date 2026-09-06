@@ -58,6 +58,21 @@
   usage block is available on the response. Sum them per run and write the
   file at exit (also on the resume-noop path). **Why:** the cap is only as
   honest as the ledger. **Effort:** S. **Priority:** P3.
+- [ ] **P2 — unit-parallel OOM rescue lane does not fire on a mid-shard JS-heap `RangeError: Out of memory`.**
+  **What:** in the v0.48.4.0 ship verification, shard 2 exhausted bun's JS heap
+  late in the shard (`RangeError: Out of memory` at a 6 KB `Float32Array`
+  allocation inside `test/search/expansion-variant-budget.test.ts`, which
+  passes alone). `scripts/run-unit-parallel.sh` documents a serial OOM-rescue
+  lane keyed on `oom_signature_in_log`, and the signature sits on its own
+  line in `shard-2.log` (the detector matches when run by hand), yet the
+  rescue queue (`oom-rescue-files.txt`) stayed empty and the run went red.
+  **Why:** the lane exists precisely so this phantom class self-heals; a
+  detector that misses it turns memory pressure into a red PR. **Where:**
+  the `shard_oom` / `oom_signature_in_log` / `failing_files_in_log` block
+  (~:585-690); check whether the shard exit-file / log path the classifier
+  reads matches the one the shard wrote, and add a regression fixture with a
+  bare `RangeError: Out of memory` line under a `(fail)` block to
+  `test/scripts/run-unit-parallel.test.ts`. **Effort:** S. **Priority:** P2.
 - [ ] **P3 — LoCoMo + BEAM lanes on `src/eval/shared/`.**
   **What:** two more long-conversation memory benchmarks, each a loader
   (dataset → sessions + questions) plus a thin runner over the dataset-agnostic
