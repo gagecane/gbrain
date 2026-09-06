@@ -1168,6 +1168,18 @@ deferred M-effort issues above are NOT repeated here.
   concept lane); (c) if trajectory: widen `extractCandidateEntities` coverage on
   event-shaped (non-person) anchors. Do NOT rebuild the date-proximity boost without
   new evidence — this entry is the receipt for why it doesn't exist.
+  **Hypothesis (a) answered (v0.48.3.0 ranker wave, Phase B, 2026-09-06, receipt
+  `A1.halfA.diag.md` in the wave's receipts):** on the half-A slice of the 430-question
+  decision set, every missed gold session of a temporal-reasoning question sits in the
+  vector arm's top 15 and its FUSED rank equals its vector rank (6–15): the loss is the
+  embedding ranking of near-duplicate distractor sessions, not fusion, boost demotion,
+  pre-fusion pool depth (H3a = 0) or reranker depth (H3b = 0). The clause-decomposition
+  signature (one gold at rank 1–3, the other at 6–15) held on 1 of 10 misses — below any
+  pre-registered rule — so no Phase B knob landed (`clause_decomposition` was never
+  built). The reranker (default ON since v0.48.2.0) is the lever that moves this class
+  (temporal 108/127 → 114/127 with rerank); the remaining misses are itemized in the
+  wave receipt. Out-of-sample confirmation of any future temporal mechanism is the
+  LoCoMo temporal slice (P3 entry at the top of this file).
 
 
 
@@ -1725,8 +1737,11 @@ deferred M-effort issues above are NOT repeated here.
       R1 DECIDED 2026-09-06 (v0.48.3.0 ranker wave): NamedThingBench core
       0 losses; the relational fixture collapsed with the reranker ON (hit@1
       21→3 of 39) and is fixed by search.relational_rerank_pin=3 (0 losses
-      with the pin, incl. autocut on); balanced reranker stays ON; cat13b +
-      world-v1 rows land with Phase E.
+      with the pin, incl. autocut on); balanced reranker stays ON. Phase E
+      (Cat 13 on the world-v1 corpus, Voyage space, held-out concepts):
+      reranker on + autocut on 55.8 vs off/off 53.0 nDCG@5 — no regression;
+      cat13b source-swamp was NOT re-run with the reranker this wave (filed
+      with the Cat 13 follow-ups).
   (c) The autocut_min_top re-tune requirement (outside-voice F16, filed at
       the P2 calibration TODO above) is rule R2 of the same A/B. -->
 

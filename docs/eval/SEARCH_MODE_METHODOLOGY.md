@@ -29,6 +29,7 @@ No private brain content is used in any reported result. The NDJSON run records 
 - **No per-question curation.** Splits are taken whole; no question is filtered for reporting.
 - **No mode-specific tuning.** The same dataset + same seed feeds every mode. The mode bundle is the only independent variable. A mode Δ therefore measures the joint effect of every knob the bundles differ on — today that's `tokenBudget`, `expansion`, `relationalRetrieval` (the typed-edge fourth recall arm, ON for balanced/tokenmax, OFF for conservative), and `searchLimit`; the canonical diff is `MODE_BUNDLES` in `src/core/search/mode.ts`.
 - **Cache comparability across upgrades.** The query cache keys on a versioned knobs hash (`KNOBS_HASH_VERSION` in `mode.ts`) that folds in the active knob set + embedding column/provider, so one mode's cached results can't be served to another mode's queries — and a version bump makes prior rows unreachable (one-time miss spike). Cross-run comparisons that straddle a knobs-hash bump see a cold cache on the first re-run.
+- **Dev slice vs decision set (ranker-wave discipline, LongMemEval).** Knob selection (which expansion budget, which autocut floor) happens on a 40-question dev slice sampled by seed 42 from the 470 scored questions (`evals/longmemeval/dev-slice-seed42.txt`, `--question-ids`); every pre-registered success rule is DECIDED on the 430 held-out questions, paired per question and per type, in integer question counts ("≥ baseline − 2 overall, no type loses more than 1 net"). The full-470 row is published alongside for comparability with earlier receipts and is labelled as including the dev slice. Split-half confirmation (seeded 235/235 or 215/215 of the decision set, `evals/longmemeval/splits-seed42.json`) is required before any non-default autocut floor or temporal mechanism ships.
 - **Stability across re-runs:** with `--seed 42` and the same dataset SHA, two runs of the same (mode, suite) produce identical retrieval orderings (modulo the optional Haiku expansion call, which is non-deterministic). Persisted in `eval_results` so anyone can re-score from a run's `--output` dumps.
 
 ## 4. Run procedure
@@ -64,6 +65,9 @@ Honest list. We name what would let a critic dismiss the numbers.
 - **BrainBench is small** (1240 docs) relative to a production brain (10K-100K pages). Absolute scores aren't predictive of your hit rate; the _delta_ between modes is.
 - **char/4 token heuristic.** Token-budget enforcement and cost estimates use a character-count / 4 heuristic. Accurate within ~5-10% for English with the OpenAI tiktoken family; off worse for Voyage (we don't use Voyage in chat retrieval, so it doesn't bias the reported numbers, but if you do, your budget caps will be approximate).
 - **Expansion's quality lift varies by query distribution.** On LongMemEval-S (cleaned September 2025 revision, 470 scored, k=5, measured 2026-09-02 at gbrain v0.48.2.0 via the gbrain-evals runner) LLM multi-query expansion measures 54.89% `recall_all@5` against 93.19% without it, so expansion is off in `conservative`/`balanced`; the lift on rarer-entity / longer-tail queries is unmeasured here. We report the corpus we measured; YMMV.
+- **The dev slice is inside the published 470.** Knob choices made on the 40 dev questions leak into the full-470 headline by construction; the 430-question decision set is the number a critic should read, and both are published side by side. Nothing is tuned on the frozen corpus beyond the pre-registered single mechanism per gap.
+- **Expansion variants are non-deterministic.** Haiku multi-query variants differ run to run, so budget cells are compared only on RECORDED variants (`--expansion-replay`), which makes the budget the sole difference between cells but means the replayed cells share one draw of the variant lottery.
+- **Reranker receipts depend on a hosted model.** `voyage:rerank-2.5` rows are reproducible only while that snapshot is served; the harness records the reranker model per run and fails a "reranker on" run that silently fell open.
 - **Paired bootstrap assumes question-level independence.** Multi-hop questions within the same conversation thread aren't independent; the bootstrap CI is slightly tighter than reality.
 - **Single brain instance per benchmark.** The benchmark spins up an in-memory PGLite per question. Cache hit rate measured here doesn't reflect a long-running production brain's cache state.
 
@@ -86,6 +90,15 @@ Before running, we expect:
 2. **conservative wins cost-per-query** by 5-15× over tokenmax. No Haiku expansion + tight 4K budget cap = single-digit-cent queries.
 3. **balanced lands within 3pp of tokenmax** on Recall@10. Intent weighting (zero-LLM cost) closes most of the expansion gap on common queries.
 4. **No mode breaks nDCG@10 ≥ 0.65** — the published "ship it" threshold for hybrid retrieval on technical corpora.
+
+**Ranker wave (v0.48.3.0) pre-registrations** — one mechanism per gap, rule written before the run, decided on the 430:
+
+5. **Expansion budget.** Budget-normalized weighted RRF (`search.expansion_variant_budget`): the balanced arm with recorded variants at the chosen budget scores ≥ plain hybrid − 2 questions and no type loses > 1; the tokenmax arm (reranker on) scores ≥ the shipped balanced default − 2. Bundles flip only if both hold.
+6. **Temporal reasoning.** Diagnose first (vector / keyword / fused / reranked rank of every missed gold session on half A of the decision set); a mechanism is chosen only for a located class and confirmed on half B. Outcome: diagnose-only — the misses are the embedding ranking of near-duplicate sessions (fused rank = vector rank), no knob landed.
+7. **Autocut floor (rule R2).** Replayed from the shipped default's captured post-rerank pool; keep 0.35 iff the shipped default scores ≥ the reranker-on/autocut-off arm − 2 with no type losing > 1, else the floor that maximizes the token-savings benefit metric under that guardrail on both halves of a seeded split.
+8. **Balanced reranker (rule R1).** Stays on iff reranker on vs off shows 0 hit@1 and ≤ 1 hit@3 losses on NamedThingBench. Outcome: the entity core passed, the relational fixture collapsed; the pre-registered fix (`search.relational_rerank_pin`, default 3) restored 0 losses, balanced stays on.
+9. **Conceptual recall (Cat 13).** E2 arm-confidence floor: held-out hybrid ≥ bare vector — FAILED (53.0 → 53.0), knob ships off. E3 metadata boost gate: held-out ≥ 57.0 — PASSED (57.8), flipped to `lexical` in every bundle; the stretch (bare vector 60.5) was not met.
+10. **Judged answer accuracy.** Predicted ≥ 92% with the shipped retrieval, official judge prompts at temperature 0, gpt-4o judge, abstention instruction in the reader prompt; NO SOTA claim on this lane (protocols across systems are unmatched).
 
 Then we publish whether the data agrees. **If a hypothesis fails, that's documented honestly** in the release README, not buried. Pre-registration is what makes the comparison defensible — without it, a "we expected X and got X" outcome is observation, not prediction.
 
@@ -278,7 +291,7 @@ This anchor + the per-query math both live in this doc on purpose. The per-query
 Every release that publishes eval numbers includes a footer with:
 
 - Code commit SHA
-- Dataset SHA (LongMemEval, BrainBench, Replay)
+- Dataset SHA (LongMemEval, BrainBench, Replay). LongMemEval-S cleaned (`xiaowu0162/longmemeval-cleaned`, `longmemeval_s_cleaned.json`): `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442`, 500 questions, 30 abstention.
 - `--seed N`
 - Run commands verbatim
 - API model identifiers used (Anthropic + OpenAI + judge model)

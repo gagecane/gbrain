@@ -699,6 +699,7 @@ CLI cannot drift. Unknown flags exit 1 before any work starts.
 | `--mode M` | `balanced` (or an injected config snapshot) | Search mode `conservative` / `balanced` / `tokenmax`, resolved through `src/core/search/mode.ts` so retrieval matches production under that mode. No mode implies `--expansion` |
 | `--reranker on\|off` | not pinned (bundle decides) | Pin `search.reranker.enabled` for the run (beats any injected snapshot). `on` preflights reranker readiness (exit 2 with the fix if it cannot run) and exits non-zero if any row fell through un-reranked (`reranker_skipped_rows`) |
 | `--autocut on\|off` | not pinned (bundle decides) | Pin `search.autocut` for the run (beats any injected snapshot) |
+| `--search-pin KEY=VALUE` | none | Pin any `search.*` config key for the run (repeatable, e.g. `--search-pin search.metadata_boost_gate=always`); pins fold into `retrieval_config_hash` and the knobs hash so a resumed file cannot mix them. Unknown keys are set verbatim — check `gbrain search modes` to confirm a key exists |
 | `--output FILE` | stdout | Write JSONL to FILE |
 | `--resume-from FILE` | off | Skip `question_id`s already present in FILE (usually the `--output` path, which then appends). Prior rows are re-scored from their `retrieved[]` + the dataset gold; a file written under different retrieval pins is refused |
 | `--allow-mixed-run-config` | off | Resume even when FILE rows carry a different `retrieval_config_hash` |
