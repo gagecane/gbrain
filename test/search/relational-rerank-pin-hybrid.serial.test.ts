@@ -119,13 +119,17 @@ afterAll(async () => {
 
 type Run = { results: SearchResult[]; meta: HybridSearchMeta | undefined; slugs: string[] };
 
-async function run(query: string, perCall: { relationalRerankPin?: number } = {}): Promise<Run> {
+async function run(query: string, perCall: { relationalRerankPin?: number; autocut?: boolean } = {}): Promise<Run> {
   let meta: HybridSearchMeta | undefined;
   const results = await hybridSearch(engine, query, {
     limit: 10,
     sourceId: 'default',
     queryEmbedFn: () => queryVector,
     onMeta: (m) => { meta = m; },
+    // Autocut is OFF in every bundle since rule R2; this file pins the pin's
+    // contract THROUGH autocut (pinned rows survive the cut, text-row autocut
+    // is byte-identical), so it turns autocut on per call explicitly.
+    autocut: true,
     ...perCall,
   });
   return { results, meta, slugs: results.map((r) => r.slug) };

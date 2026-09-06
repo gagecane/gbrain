@@ -320,7 +320,9 @@ describe('hybridSearch — onRerankPool fires with the PRE-AUTOCUT returnPool (r
     let meta: import('../../src/core/types.ts').HybridSearchMeta | undefined;
     const out = await hybridSearch(engine, 'alpha keyword', {
       limit: 10,
-      autocut: { enabled: true, jumpRatio: 0.01, minKeep: 1, minTopScore: 0 } as any,
+      // Per-call autocut is a boolean (the knobs come from the bundle: jump 0.2,
+      // minTop 0.35); the bundle default is OFF since rule R2, so opt in here.
+      autocut: true,
       reranker: {
         ...scoringReranker,
         // A dramatic cliff after the first two documents so autocut cuts.

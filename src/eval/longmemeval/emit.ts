@@ -14,7 +14,7 @@
  * line break — both writers throw instead of splitting a JSONL record.
  */
 
-import { closeSync, existsSync, openSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, renameSync, writeFileSync, writeSync } from 'node:fs';
 import { buildMetricGlossaryMeta } from '../../core/eval/metric-glossary.ts';
 import type { ByTypeSummaryV2 } from './metrics.ts';
 
@@ -23,12 +23,25 @@ export interface JsonlEmitter {
   close(): void;
 }
 
+export interface EmitterOptions {
+  /**
+   * Rewrite-in-place mode: the emitter writes to `<outputPath>.rewrite.tmp`
+   * and renames it over `outputPath` on `close()`, so the original file is
+   * never truncated while the run is in flight. Required whenever the output
+   * path IS the resume file and the rows are re-emitted rather than appended
+   * (the --judge backfill path): a kill mid-backfill used to leave a 0-byte
+   * file and every paid reader row was lost. Ignored when `append` is true.
+   */
+  atomicRewrite?: boolean;
+}
+
 /**
  * `outputPath` undefined → stdout (stays open). Append mode is used by
  * --resume-from when the output path is the resume file; truncating would
- * erase the already-answered questions.
+ * erase the already-answered questions. When the rows are rewritten instead
+ * (judge backfill), pass `atomicRewrite` — see EmitterOptions.
  */
-export function makeEmitter(outputPath?: string, append: boolean = false): JsonlEmitter {
+export function makeEmitter(outputPath?: string, append: boolean = false, options: EmitterOptions = {}): JsonlEmitter {
   if (!outputPath) {
     return {
       emit(obj) {
@@ -39,14 +52,23 @@ export function makeEmitter(outputPath?: string, append: boolean = false): Jsonl
       close() { /* stdout stays open */ },
     };
   }
-  const fd = openSync(outputPath, append ? 'a' : 'w');
+  const atomic = options.atomicRewrite === true && !append;
+  const writePath = atomic ? `${outputPath}.rewrite.tmp` : outputPath;
+  const fd = openSync(writePath, append ? 'a' : 'w');
+  let closed = false;
   return {
     emit(obj) {
       const json = JSON.stringify(obj);
       if (json.includes('\r')) throw new Error('CRLF in JSONL emit (corrupt input)');
       writeSync(fd, Buffer.from(json + '\n', 'utf8'));
     },
-    close() { closeSync(fd); },
+    close() {
+      if (closed) return;
+      closed = true;
+      closeSync(fd);
+      // Atomic on POSIX: readers see either the old file or the complete new one.
+      if (atomic) renameSync(writePath, outputPath);
+    },
   };
 }
 

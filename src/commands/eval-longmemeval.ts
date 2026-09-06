@@ -908,7 +908,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
       if (opts.judge && opts.outputPath && opts.outputPath !== opts.resumeFromPath) {
         // A judge resume into a DIFFERENT output still copies the prior rows
         // forward, so the new file is complete (rows + the summary below).
-        const em = makeEmitter(opts.outputPath, false);
+        const em = makeEmitter(opts.outputPath, false, { atomicRewrite: !!opts.outputPath && opts.resumeFromPath === opts.outputPath });
         for (const row of priorRows) if (row.kind !== 'by_type_summary' && typeof row.question_id === 'string') em.emit(row);
         em.close();
       }
@@ -1147,7 +1147,10 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     const c = cache;
     ctx.embedTxn = c ? (fn) => c.withTransaction(fn) : (fn) => fn();
 
-    const emitter = makeEmitter(opts.outputPath, appendOutput);
+    // Rewrite-in-place (judge backfill re-emits the prior rows): write to a
+    // temp file and rename on close so a kill mid-run never truncates the
+    // resume file (the paid reader rows) to zero bytes.
+    const emitter = makeEmitter(opts.outputPath, appendOutput, { atomicRewrite: !!opts.outputPath && opts.resumeFromPath === opts.outputPath });
     progress.start('eval.longmemeval', backfill.length + questions.length);
     try {
       // Judge-only backfill first (prior rows, no reader call), then re-emit
@@ -1460,6 +1463,9 @@ async function runOneQuestion(
       ...(Number.isFinite(r.rerank_score) ? { rerank_score: r.rerank_score } : {}),
       ...(r.alias_hit === true ? { alias_hit: true } : {}),
       ...(r.exact_lookup !== undefined ? { exact_lookup: true } : {}),
+      // Mirrors hybrid.ts's autocut predicates: pinned relational rows are
+      // preserved through the cut AND excluded from its cliff math.
+      ...(r.relational_pinned === true ? { relational_pinned: true } : {}),
       est_tokens: estimateTokens(r.chunk_text),
     }));
     // Autocut on (a decision was recorded): when the kept count equals the
