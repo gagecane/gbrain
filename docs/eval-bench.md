@@ -365,12 +365,17 @@ benchmark directly against gbrain's hybrid retrieval. Different evaluation
 axis from `eval replay`: public dataset with ground-truth labels, end-to-end
 question-answer pipeline, hermetic per-question brains.
 
-**Say to your agent:** *"Run the public LongMemEval benchmark against my
-gbrain retrieval"* (no skill backs this; your agent runs
-`gbrain eval longmemeval <dataset> --retrieval-only --top-k 5 --by-type --no-trajectory`,
-a self-check at the default settings. The receipted strict number below comes
-from the gbrain-evals runner, which pins reranker and autocut off; see
-"Download and run").
+The in-repo command is the reproduction path for the numbers below: it scores
+the official strict metric (`recall_all@k` — every gold session among the top-k
+distinct retrieved sessions), joins on the dataset's raw session ids, drops the
+30 abstention questions from the denominator as the official scorer does, and
+pins the reranker and autocut per run (see "Download and run" and "Flags").
+
+**Say to your agent:** *"Run the public LongMemEval benchmark like-for-like
+against my gbrain retrieval"* (no skill backs this; your agent runs
+`gbrain eval longmemeval <dataset> --retrieval-only --top-k 5 --by-type --no-trajectory --mode balanced --reranker off --autocut off`)
+— *"Run LongMemEval at my brain's shipped default search path"* (your agent runs
+the same command with `--reranker on --autocut on`).
 
 ### Current measured result
 
@@ -410,9 +415,9 @@ that hybrid had. Latency is per question.
 |---|---|---|---|---|---|---|
 | hybrid (reranker off; like-for-like row) | **93.19%** (438/470) | 98.72% | 93.32% | 4.90 | +0 / -0 | 3.7 s / 6.3 s |
 | hybrid + LLM multi-query expansion (`--expansion`, what `tokenmax` runs) | **54.89%** (258/470) | 86.60% | 71.68% | 5.00 | +3 / -183 | 5.1 s / 8.0 s |
-| hybrid-sessdiv (over-fetch 3x, keep top-5 distinct sessions) | **93.40%** (439/470) | 98.72% | 93.38% | 5.00 | +1 / -0 | 3.7 s / 6.4 s |
+| hybrid-sessdiv (over-fetch 3x, keep top-5 distinct sessions; from the 2026-09-02 run, no in-repo arm) | **93.40%** (439/470) | 98.72% | 93.38% | 5.00 | +1 / -0 | 3.7 s / 6.4 s |
 | hybrid + rerank (`voyage:rerank-2.5`, the default path) | **95.32%** (448/470) | 99.79% | 95.77% | 4.89 | +18 / -8 | 3.8 s / 6.3 s |
-| hybrid-sessdiv + rerank | **95.53%** (449/470) | 99.79% | 95.82% | 5.00 | +19 / -8 | 3.8 s / 6.3 s |
+| hybrid-sessdiv + rerank (from the 2026-09-02 run, no in-repo arm) | **95.53%** (449/470) | 99.79% | 95.82% | 5.00 | +19 / -8 | 3.8 s / 6.3 s |
 
 `recall_all@5` by question type, same run, same five arms:
 
@@ -433,13 +438,17 @@ What the arms say:
   reranker leaves at 112/121 both ways; the largest is temporal-reasoning
   (107 to 114 of 127). Any-hit climbs to 99.79%, so the reranker is promoting
   sessions already in the candidate pool rather than recalling new ones.
-- **LLM multi-query expansion is harmful at k=5.** 54.89% against 93.19%,
-  +3 / -183 paired, worse in every question type, zero expansion errors.
-  `tokenmax` users get this path; the fix (weight variant lists below the
-  original in RRF, cap their contribution, or expand only when the original's
-  evidence is weak) is the TODOS.md entry "multi-query expansion dilutes
-  small-k retrieval now that fusion is clean". `tokenmax` was not measured
-  with the reranker in this run.
+- **LLM multi-query expansion at equal weight is harmful at k=5.** 54.89%
+  against 93.19%, +3 / -183 paired, worse in every question type, zero
+  expansion errors: variant lists fusing at the same RRF weight as the
+  original outvote it. The mechanism is now a knob,
+  `search.expansion_variant_budget` — the total RRF weight the variant lists
+  share (`docs/architecture/RETRIEVAL.md`, "Multi-query expansion"). Every
+  bundle still defaults to `null` (legacy equal weight, the row above), so
+  `tokenmax` users get this path until a receipted budget flips the default.
+  Sweep it with `--expansion --expansion-replay <recorded.ndjson>
+  --expansion-variant-budget <b>` so every cell differs only in the budget.
+  `tokenmax` was not measured with the reranker in this run.
 - **Slot starvation is not the miss class.** Session-diverse over-fetch
   fills every top-5 to 5.00 distinct sessions (plain hybrid returned fewer
   than 5 on 48 of 470 questions) and adds exactly one question, with or
@@ -475,21 +484,32 @@ curl -Lo ~/datasets/longmemeval/longmemeval_s_cleaned.json \
 export GBRAIN_EMBEDDING_MODEL=openai:text-embedding-3-large
 export GBRAIN_EMBEDDING_DIMENSIONS=1536
 
-# Self-check, retrieval-only at the published cutoff (no LLM answer-gen;
-# --no-trajectory skips the per-session Haiku claim-extractor call, so no
-# chat key is needed):
+# Like-for-like reproduction of the 93.19% row: retrieval-only at the published
+# cutoff, reranker and autocut pinned off, --no-trajectory (skips the per-session
+# Haiku claim-extractor call, so no chat key is needed). --by-type appends the
+# schema-v2 summary: strict recall_all@5 per type + aggregate, any-hit as the
+# diagnostic, the 30 _abs questions excluded from the denominator, and run_config
+# (pins, embedder, dataset sha256, knobs hash, embed-cache receipt).
 gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
   --retrieval-only --top-k 5 --by-type --no-trajectory \
-  --output /tmp/lme-hybrid.jsonl
-# Two caveats make this a self-check, not a like-for-like reproduction. The
-# in-repo `--by-type` summary reports ANY-HIT recall only, and the command
-# runs the defaults: the `balanced` bundle turns the reranker and
-# autocut on whenever VOYAGE_API_KEY is set, and the CLI has no switch to pin
-# them off (the benchmark brain is isolated, so `gbrain config set` does not
-# reach it). The receipted 93.19% recall_all@5 comes from the gbrain-evals
-# runner, which pins reranker and autocut off and emits scorable per-question
-# rows (470 scored, the 30 `_abs` questions dropped):
-#   bash eval/runner/longmemeval-batch.sh --adapters hybrid --embedding-model openai:text-embedding-3-large --embedding-dims 1536
+  --mode balanced --reranker off --autocut off \
+  --output ~/lme-receipts/hybrid.ndjson
+
+# The shipped default path (what balanced/tokenmax run: reranker on, autocut on).
+# --reranker on preflights reranker readiness (exit 2 with the fix if it cannot
+# run) and fails the run if any row fell through un-reranked. Note the 95.32%
+# row above was reranker on with autocut OFF (`--reranker on --autocut off`).
+gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
+  --retrieval-only --top-k 5 --by-type --no-trajectory \
+  --mode balanced --reranker on --autocut on \
+  --output ~/lme-receipts/default.ndjson
+
+# Embeddings are cached content-addressed at ~/.cache/gbrain-eval/longmemeval-embed.sqlite
+# (--embed-cache FILE to relocate, --no-embed-cache to disable), so every arm after
+# the first sees byte-identical vectors; run_config.cache.misses must be 0 for a
+# like-for-like arm. --record appends the run to .gbrain-evals/eval-results.jsonl;
+# --question-ids evals/longmemeval/dev-slice-seed42.txt runs the committed
+# 40-question dev slice.
 
 # Full pipeline (Anthropic key required for answer-gen):
 gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json --limit 50 \
@@ -520,20 +540,41 @@ python evaluate_qa.py /tmp/hypothesis.jsonl
 
 ### Flags
 
+Every flag lives in one table in `src/commands/eval-longmemeval.ts`
+(`LME_FLAGS`) that drives both the parser and `--help`, so this list and the
+CLI cannot drift. Unknown flags exit 1 before any work starts.
+
 | Flag | Default | Purpose |
 |---|---|---|
-| `--limit N` | run all | Cap question count (iterate fast) |
-| `--retrieval-only` | off | Emit retrieved chunks; no LLM answer-gen |
-| `--keyword-only` | off | Disable vector path (debug retrieval issues) |
-| `--expansion` | **off** | Multi-query expansion. Off by default for determinism (no per-query Haiku call). Pass to opt in. |
-| `--top-k K` | 8 | Retrieval depth (the published result uses `--top-k 5`) |
-| `--mode M` | config | Search mode `conservative`, `balanced`, or `tokenmax`, resolved through `src/core/search/mode.ts`; `tokenmax` implies `--expansion` |
-| `--model M` | resolved | Default resolves through `resolveModel()` 6-tier chain (`models.eval.longmemeval` config key) |
-| `--output FILE` | stdout | Write hypothesis JSONL to file instead of stdout |
-| `--resume-from FILE` | off | Skip `question_id`s already present in FILE (usually the same path as `--output`, which then appends) |
-| `--no-trajectory` | off | Skip the trajectory claim extractor and per-question intent routing (A/B baseline) |
-| `--by-type` | off | Append a `by_type_summary` JSON line with per-question-type any-hit R@k |
-| `--by-type-floor F` | off | Exit non-zero if any question type's rate is below F in [0, 1]; implies `--by-type` |
+| `--limit N` | run all | Run only the first N questions (after `--question-ids` filtering) |
+| `--model M` | resolved | Answer-generation model; default resolves through `resolveModel()` (`models.eval.longmemeval` config key) |
+| `--retrieval-only` | off | Skip LLM answer generation; emit the retrieved sessions as the hypothesis |
+| `--keyword-only` | off | Skip vector embedding: pure keyword retrieval (no reranker, no embed cache) |
+| `--expansion` | **off** | LLM multi-query expansion. Off for EVERY mode — the per-call setting beats the bundle, so `--mode tokenmax` alone does not expand. One Haiku call per question, non-deterministic; each row records `expansion_variants` |
+| `--expansion-replay FILE` | off | Serve the `expansion_variants` recorded in FILE (a prior `--expansion` run) instead of calling the LLM, so cells differ only in their knobs; implies `--expansion`. A question missing from FILE is an `expansion_replay_miss` error row and the run exits 1 |
+| `--expansion-variant-budget B` | not pinned | Pin `search.expansion_variant_budget`: `legacy` (every RRF list weight 1) or a number in (0, 4] — the total RRF weight shared by the expansion variant lists (the original list always keeps weight 1) |
+| `--top-k K` | 8 | Retrieve K chunk rows per question; `recall_*@k` is scored over the distinct sessions among those K rows (the published rows use `--top-k 5`) |
+| `--mode M` | `balanced` (or an injected config snapshot) | Search mode `conservative` / `balanced` / `tokenmax`, resolved through `src/core/search/mode.ts` so retrieval matches production under that mode. No mode implies `--expansion` |
+| `--reranker on\|off` | not pinned (bundle decides) | Pin `search.reranker.enabled` for the run (beats any injected snapshot). `on` preflights reranker readiness (exit 2 with the fix if it cannot run) and exits non-zero if any row fell through un-reranked (`reranker_skipped_rows`) |
+| `--autocut on\|off` | not pinned (bundle decides) | Pin `search.autocut` for the run (beats any injected snapshot) |
+| `--output FILE` | stdout | Write JSONL to FILE |
+| `--resume-from FILE` | off | Skip `question_id`s already present in FILE (usually the `--output` path, which then appends). Prior rows are re-scored from their `retrieved[]` + the dataset gold; a file written under different retrieval pins is refused |
+| `--allow-mixed-run-config` | off | Resume even when FILE rows carry a different `retrieval_config_hash` |
+| `--question-ids FILE` | all | Run only the listed `question_id`s (one per line, `#` comments); unknown ids or an empty file exit 1. Dev-slice / held-out discipline (`evals/longmemeval/`) |
+| `--no-trajectory` | off | Skip the Haiku claim extractor AND the per-question intent routing (like-for-like retrieval receipts) |
+| `--by-type` | off | Append the `schema_version: 2` `by_type_summary` line: per type `{total, all_hit, all_rate, any_hit, any_rate}` + aggregate, `excluded_abstention`, `mean_distinct_sessions`, `run_config` |
+| `--by-type-floor F` | off | Exit non-zero if any question type's rate is below F in [0, 1]; gates on `recall_all` by default; implies `--by-type` |
+| `--by-type-floor-metric M` | `recall_all` | Which rate `--by-type-floor` gates on: `recall_all` or `recall_any` |
+| `--include-abstention` | off | Count `_abs` (abstention) questions in the recall denominators (default: emitted with `abstention: true`, excluded; the count lands in `excluded_abstention`) |
+| `--embed-cache FILE` | `~/.cache/gbrain-eval/longmemeval-embed.sqlite` | Content-addressed embedding cache (bun:sqlite); hits/misses land in `run_config.cache`, and misses must be 0 for a like-for-like arm |
+| `--no-embed-cache` | — | Disable the embedding cache for this run |
+| `--capture-pool` | off | Record `rerank_pool` per row: the post-rerank candidate pool BEFORE autocut / the limit slice (`slug`, `chunk_id`, `session_id`, `rrf_rank`, `rerank_score`, `alias_hit`, `est_tokens`) for `scripts/replay-autocut-floor.ts` |
+| `--record` | off | Append an `EvalRunRecord` (suite `longmemeval`, params = `run_config`, error text secret-redacted) to `.gbrain-evals/eval-results.jsonl` |
+
+Row fields: `recall_all_hit`, `recall_any_hit`, `recall_hit` (a DEPRECATED alias
+of `recall_any_hit`, kept for v1 readers), `abstention`,
+`distinct_sessions_in_top_k`, `retrieved[]`, `retrieved_session_ids`,
+`search_meta`, `retrieval_config_hash`.
 
 ### Numbers
 
@@ -582,31 +623,67 @@ commands per high-severity finding.
 
 Three further eval surfaces, and the dev loop that uses them.
 
-### `gbrain eval longmemeval --by-type` — per-question-type R@k breakdown
+### `gbrain eval longmemeval --by-type` — per-question-type `recall_all@k` / `recall_any@k` breakdown
 
 LongMemEval computes per-question-type recall internally, and surfaces it in
 machine-readable form:
 
-1. Every per-question JSONL row includes a `question: string` field so the
-   `gbrain eval cross-modal --batch` consumer (below) can read it without
-   joining back against the source dataset.
-2. The `--by-type` flag emits a final aggregate line keyed by `question_type`:
+1. Every per-question JSONL row includes `question: string` (so the
+   `gbrain eval cross-modal --batch` consumer below can read it without joining
+   back against the dataset), `question_type`, `abstention`, `recall_all_hit`
+   (every gold session among the top-k distinct sessions), `recall_any_hit`
+   (at least one), `recall_hit` — a DEPRECATED alias of `recall_any_hit` kept
+   for v1 readers — `gold_total` / `gold_found`, `distinct_sessions_in_top_k`,
+   `retrieved[]` (every returned chunk row with its raw `session_id`, rank,
+   score and `rerank_score`), `retrieved_session_ids`, `search_meta`
+   (`vector_enabled`, `expansion_applied`, `degraded`, `reranked`, `autocut`)
+   and `retrieval_config_hash`.
+2. The `--by-type` flag emits a final `schema_version: 2` aggregate line keyed
+   by `question_type` (values illustrative):
 
 ```json
-{"schema_version": 1, "kind": "by_type_summary",
- "recall_by_type": {"single-session-user": {"hit": 18, "total": 19, "rate": 0.947}},
- "aggregate": {"hit": 110, "total": 120, "rate": 0.917}}
+{"schema_version": 2, "kind": "by_type_summary", "metric": "recall_all@k", "k": 5,
+ "excluded_abstention": 3,
+ "recall_by_type": {"single-session-user": {"total": 19, "all_hit": 17, "all_rate": 0.895, "any_hit": 18, "any_rate": 0.947}},
+ "aggregate": {"total": 120, "all_hit": 104, "all_rate": 0.867, "any_hit": 112, "any_rate": 0.933},
+ "legacy_rows": 0, "gold_missing_from_haystack": 0, "slug_collisions": 0,
+ "mean_distinct_sessions": 4.9,
+ "run_config": {"mode": "balanced", "keyword_only": false,
+   "reranker": {"enabled": false, "model": "voyage:rerank-2.5"}, "autocut": false,
+   "expansion": false, "expansion_variant_budget": null, "expansion_replay": null,
+   "embedder": "openai:text-embedding-3-large@1536", "topK": 5, "trajectory": false,
+   "dataset_sha256": "<sha256>", "dataset_questions": 500, "question_ids_file": null,
+   "retrieval_config_hash": "<sha256>", "knobs_hash": "<hash>", "knobs_hash_version": 29,
+   "cache": {"path": "~/.cache/gbrain-eval/longmemeval-embed.sqlite", "hits": 4210,
+     "misses": 0, "bypassed": 0, "infra_faults": 0, "canonical_sha256": "<sha256>", "sha256": "<sha256>"},
+   "reranker_skipped_rows": 0, "vector_degraded_rows": 0, "expansion_failed_rows": 0,
+   "expansion_replay_miss": 0, "gold_missing_from_haystack": 0, "slug_collisions": 0,
+   "excluded_abstention": 3, "errors": 0}}
 ```
 
-**Resume-safe.** When `--resume-from` is the same path as `--output`, the
-summary is rebuilt from the file (each per-row includes `question_type` and
-`recall_hit`) so the final aggregate covers all resumed questions, not just
-this run's slice. The prior summary at the file tail is replaced, not
-appended — a brain that resumes 5 times across a 500-question run ends with
+`metric` names the headline: `all_rate` is strict `recall_all@k`, `any_rate`
+the lenient `recall_any@k` (rates are `null` on an empty bucket, never NaN).
+`excluded_abstention` counts the `_abs` questions kept out of the denominators
+(`--include-abstention` folds them in). `legacy_rows` counts rows folded from a
+pre-v2 file that carried only `recall_hit` (0 on a fresh run; when non-zero the
+`all_rate` is a lower bound). `run_config.cache` is `null` with a
+`cache_skipped` reason when the embed cache was disabled, the run was
+`--keyword-only`, or no embedding gateway was configured.
+
+**Resume-safe.** When `--resume-from` is the same path as `--output`, prior
+rows are re-scored from their `retrieved[]` (or `retrieved_session_ids`)
+against the dataset's gold — stored booleans are never trusted — so the final
+aggregate covers every resumed question, not just this run's slice. A file
+whose rows carry a different `retrieval_config_hash` (other pins, or a config
+snapshot that differs in any result-shaping knob) is refused unless
+`--allow-mixed-run-config`. The prior summary at the file tail is replaced,
+not appended — a run that resumes 5 times across 500 questions ends with
 exactly ONE summary at the tail.
 
 **Optional gate.** `--by-type-floor 0.85` exits non-zero when any
-`question_type`'s rate falls below 0.85. Default: informational only.
+`question_type`'s `all_rate` (strict `recall_all@k`) falls below 0.85;
+`--by-type-floor-metric recall_any` gates on the lenient rate instead.
+Default: informational only.
 
 ```bash
 # Diagnose per-type ranking quality after a search-touching change.

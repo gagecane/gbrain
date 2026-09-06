@@ -258,23 +258,12 @@ per `[CDX-5+6]` in `~/.claude/plans/lets-take-a-look-validated-parrot.md` — so
 `gbrain eval replay` and `gbrain eval longmemeval` test the same mode-affected
 behavior as the production `query` op.
 
-**Cache-key contamination hotfix `[CDX-4]`:** migration v56 added a
-`knobs_hash` column to `query_cache`. The lookup filter is now
-`WHERE source_id = $ AND knobs_hash = $ AND embedding similarity < $` so a
-tokenmax write (expansion=on, limit=50) can't be served to a conservative
-read.
-
-**v0.36.3.0 knobs_hash v=2 → v=3.** The hash now folds the active
-embedding column name + provider into the cache key, so a query routed
-through `embedding_voyage` (1024d Voyage) can't be served a cache row
-written against `embedding` (1536d OpenAI). Existing v=2 rows become
-unreachable on first re-query (one-time miss spike on upgrade);
-`mode.ts:KNOBS_HASH_VERSION` is the single source of truth.
-
-**v0.42.34.0 knobs_hash v=9 → v=10.** Folds the `relationalRetrieval` knob +
-depth into the cache key so a relational-on result set can't be served to a
-relational-off lookup (same contamination class as graph_signals). One-time
-miss spike on upgrade.
+**Cache key.** The `query_cache` lookup filters on `knobs_hash`
+(`WHERE source_id = $ AND knobs_hash = $ AND embedding similarity < $`) so a
+tokenmax write can't be served to a conservative read. `mode.ts:KNOBS_HASH_VERSION`
+is the single source of truth; every result-affecting knob folds into `knobsHash`
+(a version bump is a one-time cache-miss spike on upgrade); the version-by-version
+rationale lives in the comment chain at `test/search/knobs-hash-reranker.test.ts`.
 
 **Relational retrieval (v0.42.34.0).** `relationalRetrieval` (on for
 balanced/tokenmax) adds a fourth recall arm: a relational query ("who invested

@@ -131,7 +131,9 @@ The classifier is deterministic (no LLM call). Wrong classification degrades gra
 
 ## Multi-query expansion
 
-For `detail: 'high'` searches, `src/core/search/expansion.ts` runs a Haiku-class LLM call to produce 2-3 query variants. Each variant runs through the full hybrid stack; results merge via RRF. Catches synonym misses without recall loss.
+For `detail: 'high'` searches, `src/core/search/expansion.ts` runs a Haiku-class LLM call to produce 2-3 query variants. Each variant's vector list enters RRF fusion alongside the original's. Expansion is NOT free on recall: on LongMemEval-S (470 scored questions, k=5, the 2026-09-02 receipt in `docs/eval-bench.md`) plain hybrid scores 93.19% strict `recall_all@5` while hybrid + equal-weight expansion scores 54.89% (paired +3 / -183 questions) — variant lists fusing at the same weight as the original outvote it on small-k recall, and the damage grows with the nondeterministic variant count.
+
+The fix is budget-normalized weighted RRF, composed in `src/core/search/fusion-lists.ts`. Every vector list is a role-tagged arm (`original` | `variant` | `clause` | `image`) — tagged objects, never a positional convention, so a failed arm or a fell-open image branch can't mis-tag a list. The `original` arm always fuses at weight 1; the non-empty `variant`/`clause` arms share ONE total weight budget, `search.expansion_variant_budget` (`weight_i = b / n_voting_arms`, each row scored `weight / (k + rank)`), so total expansion influence is exactly `b` however many variants the LLM produced. `null` — the default in all three mode bundles — is the legacy equal-weight fusion (every list weight 1, byte-identical). A budget in (0, 4] is set with `gbrain config set search.expansion_variant_budget <b>`, per call via `HybridSearchOpts.expansionVariantBudget`, or pinned per eval arm with `gbrain eval longmemeval --expansion-variant-budget <b>` (sweep it against frozen `--expansion-replay` variants so cells differ only in `b`). Arithmetic: two variants agreeing on a distractor at rank 0 tie the original's rank-0 vote exactly at `b = 1.0`; legacy with two variants is ≈ `b = 2.0`; `b = 0.5` subordinates them. The knob is a no-op when expansion is off and folds into the query-cache key (`evb=`).
 
 Expansion is opt-in per mode bundle (`tokenmax` on by default; `balanced` + `conservative` off). Default off in the cheap tiers because the LLM call adds ~$0.001/query and ~200ms — real money at scale. The `query` op is the exception: it defaults `expand: true` per call (pass `expand: false` to opt out) — expansion-by-default is what makes it the concept/landscape verb.
 
@@ -152,6 +154,7 @@ hybrid recall + fusion:
    ├── title-phrase arm
    ├── relational (typed-edge recall arm — relational queries only)
    ├── source-aware re-rank (CASE in SQL)
+   ├── role-tagged arms; variant/clause lists weighted by search.expansion_variant_budget INSIDE the fusion (fusion-lists.ts)
    └── RRF fusion → cosine re-score → post-fusion boosts
        (backlink / salience / recency / graph signals / exact-match)
        │
@@ -232,18 +235,26 @@ score is below `minTopScore` (default 0.35, config `search.autocut_min_top`),
 cliff trimming is skipped entirely — a low-confidence list returns the full
 cluster for the caller to judge instead of collapsing to one result. Knobs:
 per-call `SearchOpts.autocut` → `search.autocut` / `search.autocut_jump` /
-`search.autocut_min_top` config → mode bundle.
+`search.autocut_min_top` config → mode bundle. The pre-autocut pool can be
+captured for offline floor replay: `hybridSearch` exposes an eval-only
+`onRerankPool` hook that fires with the exact pool `applyAutocut` is about to
+cut (post-rerank, post alias-hop / exact-lookup, unscored injections included),
+`gbrain eval longmemeval --capture-pool` records it per row as `rerank_pool`,
+and `scripts/replay-autocut-floor.ts` replays every floor — including `off` —
+from that single capture, validating byte-for-byte against the live decisions
+before any other cell is read.
 
 Each stage is testable in isolation. Each stage is replaceable. The whole pipeline is < 1ms of orchestration cost; the latency budget goes to the upstream HTTP calls (embedding, rerank) and the index scans.
 
 ## How to verify on your own brain
 
 ```bash
-# Self-check on the public LongMemEval benchmark (cleaned S split, published cutoff k=5)
-# at the default: reranker on when VOYAGE_API_KEY is set; --by-type prints any-hit recall
-gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json --retrieval-only --top-k 5 --by-type --no-trajectory
-# The receipted strict recall_all@5 (reranker and autocut pinned off) comes from the gbrain-evals runner:
-#   bash eval/runner/longmemeval-batch.sh --adapters hybrid --embedding-model openai:text-embedding-3-large --embedding-dims 1536
+# Reproduce the public LongMemEval receipt (cleaned S split, k=5) like-for-like:
+# --by-type prints strict recall_all@5 (headline) and recall_any@5 (diagnostic);
+# the like-for-like row pins the reranker and autocut off.
+gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
+  --retrieval-only --top-k 5 --by-type --no-trajectory --mode balanced --reranker off --autocut off
+# The shipped default path (what balanced/tokenmax run): --reranker on --autocut on
 
 # Capture your own queries and replay against retrieval changes
 export GBRAIN_CONTRIBUTOR_MODE=1

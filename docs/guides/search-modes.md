@@ -23,6 +23,7 @@ The bundles are frozen in `src/core/search/mode.ts` (`MODE_BUNDLES`):
 | `intentWeighting`             | true           | true       | true           |
 | `tokenBudget`                 | **4000**       | **12000**  | **off**        |
 | `expansion` (LLM multi-query) | false          | false      | **true**       |
+| `expansion_variant_budget`    | `null` (legacy) | `null` (legacy) | `null` (legacy) |
 | `relationalRetrieval`         | false          | **true**   | **true**       |
 | `searchLimit` default         | 10             | 25         | 50             |
 | `reranker` (cross-encoder)    | off            | `voyage:rerank-2.5` | `voyage:rerank-2.5` |
@@ -34,11 +35,24 @@ The bundles are frozen in `src/core/search/mode.ts` (`MODE_BUNDLES`):
 - **`tokenmax`** — no token budget, LLM query expansion on, 50 results.
   Pairs with an expensive downstream model you want fully fed.
 
-Three of the knobs deserve a sentence:
+Four of the knobs deserve a sentence:
 
 - **`expansion`** rewrites your query into multiple variants via a cheap
   LLM call per search (adds roughly $1.50 per 1K queries) — better recall,
   small extra cost.
+- **`expansion_variant_budget`** (config key
+  `search.expansion_variant_budget`) is the total RRF weight the expansion
+  variants share at fusion time (`weight_i = b / n_voting_arms`; the original
+  query's list always keeps weight 1). `null` — the default in every bundle —
+  is the legacy equal-weight fusion, under which the LongMemEval receipt shows
+  expansion halving small-k strict recall (93.19% → 54.89% `recall_all@5`); a
+  number in (0, 4] caps the variants' total influence (`1.0` lets two agreeing
+  variants exactly tie the original's top vote; `0.5` subordinates them). A
+  no-op when `expansion` is off. **Say to your agent:** *"Cap how much query
+  expansion can outvote my original query"* (no skill backs this; your agent
+  runs `gbrain config set search.expansion_variant_budget <b>`, and
+  `gbrain config set search.expansion_variant_budget legacy` restores the
+  default).
 - **`relationalRetrieval`** adds a graph-walk recall arm for relational
   questions ("who invested in X", "what connects A and B"); it's a pure
   no-op for non-relational queries. The `query` op's `relational` flag
