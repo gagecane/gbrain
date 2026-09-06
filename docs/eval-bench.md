@@ -541,6 +541,18 @@ gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
   --judge --judge-model openai:gpt-4o --max-usd 5 --yes \
   --output ~/lme-receipts/judged.ndjson
 
+# Re-judge until judge_errors and skipped_budget are both 0: a judge-only backfill
+# (no reader calls) under the same retrieval pins; FILE is rewritten in place.
+gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
+  --top-k 5 --no-trajectory --mode balanced --reranker on \
+  --judge --resume-from ~/lme-receipts/judged.ndjson --output ~/lme-receipts/judged.ndjson
+
+# The hypotheses in that file also score under LongMemEval's own evaluate_qa.py
+# (not bundled): python evaluate_qa.py ~/lme-receipts/judged.ndjson
+```
+
+### Judged answer accuracy (`--judge`)
+
 **Protocol (v0.48.3.0).** Retrieval = the release default (`balanced`,
 reranker on, autocut off, k=5). Reader context = the FULL text of every
 distinct session among the top-5 retrieved chunk rows, wrapped in
@@ -554,18 +566,6 @@ the OpenAI API's minimum; the official 10 is rejected, and a one-token yes/no
 verdict is unaffected. Gold and hypothesis sit inside a data-boundary wrapper
 (disclosed deviation). Every row carries the provider-reported reader and
 judge snapshot ids and the reader prompt sha.
-
-# Re-judge until judge_errors and skipped_budget are both 0: a judge-only backfill
-# (no reader calls) under the same retrieval pins; FILE is rewritten in place.
-gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
-  --top-k 5 --no-trajectory --mode balanced --reranker on \
-  --judge --resume-from ~/lme-receipts/judged.ndjson --output ~/lme-receipts/judged.ndjson
-
-# The hypotheses in that file also score under LongMemEval's own evaluate_qa.py
-# (not bundled): python evaluate_qa.py ~/lme-receipts/judged.ndjson
-```
-
-### Judged answer accuracy (`--judge`)
 
 The second lane. Instead of asking whether the gold sessions were retrieved,
 it asks whether the READER's answer was right: the reader answers each
