@@ -2,6 +2,176 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.48.3.0] - 2026-09-06
+
+**The ranker wave: search stops burying graph answers and concept pages, `gbrain eval longmemeval` becomes the like-for-like receipt producer, and every ranking default that moved carries a pre-registered receipt.**
+
+Two shipped-default regressions in the ranking pipeline are fixed, both found
+by the wave's own receipts rather than by users. First, the cross-encoder
+reranker that `balanced` turned on in v0.48.2.0 scores page text, so an
+answer that comes from your brain's typed-edge graph ("who invested in
+acme-example") need not mention the words you asked with, and the reranker
+pushed those answers off page 1. Relational answers are now pinned back
+above the reranked text rows. Second, the post-fusion metadata boosts
+(backlinks, recency, graph adjacency) promoted well-connected hub pages over
+the page that actually matched whenever the vector arm was the only voter,
+which is exactly the shape of a paraphrased concept question. Those boosts
+now wait for a lexical vote. Both fixes are pure permutations of the
+candidate pool, off by one config key each, and every other ranking default
+stayed where the receipts said it should.
+
+The LongMemEval harness in this repo is now the reproduction path for the
+published numbers: it scores the official strict `recall_all@5`, excludes
+abstention questions, joins gold session ids without a sanitization step in
+between, pins the reranker, autocut and any `search.*` knob per run, caches
+embeddings so arms see byte-identical vectors, and can LLM-judge answer
+accuracy with the official prompts. The documented invocation was rejected
+by the CLI's flag validator before this release; it exits 0 now.
+
+**Say to your agent:** *"Run the public LongMemEval benchmark like-for-like
+against my brain"* — *"score my brain's answer accuracy on LongMemEval"* —
+your agent runs
+`gbrain eval longmemeval <longmemeval_s_cleaned.json> --retrieval-only --top-k 5 --by-type --no-trajectory --reranker off --autocut off`
+and `… --judge --no-trajectory` (no skill backs these; they are CLI paths).
+
+### How to use it
+
+```bash
+gbrain search modes                                   # relational_rerank_pin 3, metadata_boost_gate lexical, per-knob attribution
+gbrain search "who invested in acme-example" --explain  # meta.relational_rerank_pin shows what was pinned and from where
+gbrain search "how do we think about pricing power" --explain   # meta.metadata_boost_gate: vector_only_voter → boosts skipped
+gbrain config set search.relational_rerank_pin off    # pre-pin ranking
+gbrain config set search.metadata_boost_gate always   # pre-wave boosts
+```
+
+### Things to watch
+
+- **Search-cache epoch: one-time miss spike.** The query-cache knobs hash
+  moves to v=29 (four new parts: expansion budget, relational pin, keyword
+  arm confidence floor, metadata boost gate). Existing cached result sets are
+  unreachable once and refill within `cache.ttl_seconds`.
+- **`--by-type-floor` now gates on the strict metric.** A question whose gold
+  sessions are only partly retrieved fails the floor; `--by-type-floor-metric recall_any`
+  restores the old semantics. The `--by-type` summary line is `schema_version: 2`
+  (`all_hit`/`all_rate`/`any_hit`/`any_rate` per type); `recall_hit` on each
+  row is a deprecated alias of `recall_any_hit`.
+- **If you run `tokenmax`:** <!-- TBD Phase A: outcome of the expansion budget flip (A3′/A3′R rule) -->
+- **Autocut floor:** <!-- TBD Phase C: R2 decision from the A4 capture replay -->
+- The relational pin trusts your graph. A stale or wrong edge now puts up to
+  three edge pages at the top of the results instead of one at the end of
+  page 1; `gbrain config set search.relational_rerank_pin off` if that bites.
+
+### Measured
+
+<!-- TBD: arms table (A1, A2, A3, A3′, A3′R, A4, final release configuration), per-type table, paired deltas on the 430 and the 470, autocut replay table, judged QA row with disclosure. Fill from ~/gbrain-lme-receipts once Phase A/C/D land. -->
+
+- **Harness parity.** The in-repo harness reproduces the 2026-09-02
+  gbrain-evals receipt on the same corpus: 439/470 strict `recall_all@5`
+  (93.40%) with reranker and autocut off against 438/470, 469 of 470 rows
+  agreeing per question, any-hit identical at 464/470; with the reranker on,
+  449/470 (95.53%) with the same +18 / −8 paired pattern as the receipt.
+- **Relational pin (rule R1 closeout).** NamedThingBench paired reranker on
+  vs off: the 11 entity-core questions lose nothing either way; the 39
+  graph-relationship questions collapsed with the reranker on (hit@1 21 → 3,
+  hit@3 27 → 5) and recover fully with `search.relational_rerank_pin=3`
+  (0 hit@1 / 0 hit@3 losses, measured with autocut on in the shipped shape).
+  Balanced reranker stays on. LongMemEval has no relational intent, so its
+  rows are unchanged by the pin.
+- **Metadata boost gate (Cat 13 conceptual recall, gbrain-evals).** Held-out
+  concepts, Voyage space: bare vector 60.5 nDCG@5 vs gbrain 53.0 before;
+  the pre-registered rule (≥ 57.0) passed at 57.8 with reranker and autocut
+  off and 57.9 on the shipped default (55.8 before); NamedThingBench,
+  BrainBench, the retrieval canary and the LongMemEval dev slice are
+  byte-identical. The stretch (bare vector) is not met and is filed. The
+  competing mechanism, an arm-confidence floor that down-weights a weak
+  keyword arm, moved the held-out score 53.0 → 53.0 and ships off.
+- **Temporal reasoning: located, not fixed.** Every missed gold session on
+  the diagnosis half sits at vector rank 6–15 and fuses at exactly that rank;
+  the loss is the embedding ranking of near-duplicate sessions, not fusion,
+  pool depth or reranker depth. No temporal knob landed; the reranker is the
+  lever that moves this class.
+
+### To take advantage of v0.48.3.0
+
+`gbrain upgrade` should do this automatically. If it didn't:
+
+1. **Check what is running:** `gbrain search modes` (expect
+   `relational_rerank_pin 3` and `metadata_boost_gate lexical`).
+2. **Verify on a graph question:** `gbrain search "who invested in acme-example" --explain`
+   shows `relational_rerank_pin` in the meta when the reranker reordered.
+3. **Reproduce a benchmark row:** download `longmemeval_s_cleaned.json` and run
+   the Say-to-your-agent command above with `--embed-cache` set.
+4. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues
+   with the output of `gbrain search modes`.
+
+### Itemized changes
+
+#### Added
+- **`search.relational_rerank_pin`** (default 3 in every bundle;
+  `src/core/search/relational-rerank-pin.ts`): after the reranker, up to N
+  relational-arm rows are re-pinned above the reranked text rows in fused
+  order; pinned rows survive autocut and are stamped `relational_pinned`.
+  Per-call `relationalRerankPin`, `--explain` meta, knobs-hash part `rrp=`.
+- **`search.metadata_boost_gate`** (`always` | `lexical`, `lexical` in every
+  bundle; `src/core/search/metadata-boost-gate.ts`): skips the backlink,
+  salience, recency, graph-signal and alias-resolved boosts when no strict
+  keyword, title or relational row fused. `--explain` meta names the reason;
+  knobs-hash part `mbg=`.
+- **`search.expansion_variant_budget`** (`src/core/search/fusion-lists.ts`):
+  budget-normalized weighted RRF for LLM expansion variants — one total weight
+  shared by the non-empty variant lists so expansion influence no longer
+  scales with the variant count. Every vector recall list is a role-tagged
+  arm (`original` | `variant` | `clause` | `image`) composed at ONE point.
+  <!-- TBD Phase A: bundle default (null = legacy, or the receipted budget) -->
+- **`search.keyword_arm_confidence_floor`** (off in every bundle;
+  `src/core/search/arm-confidence.ts`): down-weights the keyword and title
+  arms when the keyword arm's top-vs-second margin is below the floor.
+  Operator knob only; its pre-registered receipt did not move the held-out
+  score.
+- **LongMemEval harness** (`gbrain eval longmemeval`): strict `recall_all@5`
+  + `recall_any@5` per row and per type (`schema_version: 2`), abstention
+  exclusion (`--include-abstention`), raw-id join with `slug_collision`
+  detection, `--reranker on|off` (readiness preflight, exit 2), `--autocut on|off`,
+  `--search-pin KEY=VALUE`, `--expansion-variant-budget`, `--expansion-replay FILE`
+  (recorded variants), `--question-ids FILE` (dev slice), `--embed-cache FILE`
+  (content-addressed bun:sqlite cache with dims verification and a canonical
+  file hash in `run_config`), `--capture-pool` (post-rerank pool for autocut
+  replay), `--record` (ledger row with secret-redacted errors), resume gated by
+  `retrieval_config_hash` (`--allow-mixed-run-config`), `retrieved[]` rows for
+  replay. Committed seed-42 dev slice and decision-set splits under
+  `evals/longmemeval/`.
+- **Judged answer-accuracy lane** (`--judge`, `--judge-model`, `--max-usd`,
+  `--yes`, `--judge-concurrency`, `--allow-incomplete-judgments`): the official
+  `evaluate_qa.py` prompts per question type at temperature 0 with gpt-4o,
+  `judge_error` distinct from incorrect, budget soft-stop, judge-only backfill
+  on `--resume-from`, headline scores every ungradable row as incorrect. The
+  reader prompt carries the official abstention instruction. `ChatOpts.temperature`
+  reaches the gateway transport.
+- **Metric glossary:** `recall_all@k`, `recall_any@k`, `qa_accuracy`.
+- **Scripts:** `scripts/eval-spend-guard.sh` (fail-closed paid-run ledger with
+  a cap), `scripts/replay-autocut-floor.ts` (floor sweep from a captured pool,
+  live-decision validation, split-half), `scripts/lme-miss-diagnostics.ts`
+  (per-arm gold ranks and miss classes), `scripts/r1-namedthing-rerank-ab.ts`
+  (paired reranker A/B with autocut / relational-pin / generic pin overlays).
+
+#### Changed
+- **Flag registry** attributes compound `if (command === 'eval' && …)` dispatch
+  blocks to their command, so the documented `gbrain eval longmemeval` flags
+  are accepted (they were rejected as unknown before). The `eval` row remains a
+  union across eval subcommands.
+- **Bundle defaults:** `relational_rerank_pin` 3 and `metadata_boost_gate`
+  `lexical` in `conservative`, `balanced` and `tokenmax`. <!-- TBD Phase A/C: expansion budget, autocut floor -->
+- **`--by-type-floor`** gates on `recall_all` by default (see Things to watch).
+- `docs/eval-bench.md`, `docs/architecture/RETRIEVAL.md`, `docs/guides/search-modes.md`
+  and `docs/eval/SEARCH_MODE_METHODOLOGY.md` describe the harness as the
+  reproduction path, the new knobs, the dev-slice / decision-set discipline
+  and the wave's pre-registrations.
+
+#### Removed
+- The two eval scaffolds that reported `ok: true` for work never run
+  (`eval-markdown-greenfield`, `eval-extract-atoms`) are deleted; the
+  remaining scaffold returns an honest not-implemented envelope.
+
 ## [0.48.2.0] - 2026-09-02
 
 **Your search reranker now runs on Voyage, and every surface tells you whether it is actually running.**
