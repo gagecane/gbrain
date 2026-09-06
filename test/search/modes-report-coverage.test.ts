@@ -49,6 +49,7 @@ describe('#4604 buildModesReport — full-bundle knob coverage', () => {
       'relational_retrieval_depth',
       'relational_rerank_pin',
       'keyword_arm_confidence_floor',
+      'metadata_boost_gate',
       'graph_signals',
       'autocut',
       'title_boost',
@@ -69,6 +70,19 @@ describe('#4604 buildModesReport — full-bundle knob coverage', () => {
     expect(off.resolved.keyword_arm_confidence_floor.source).toBe('override');
     expect(searchCmd.formatModesText(off)).toMatch(/keyword_arm_confidence_floor\s+= off \(null\)\s+\[/);
     expect(searchCmd.formatModesText(six)).toMatch(/keyword_arm_confidence_floor\s+= 0\.6\s+\[/);
+  });
+
+  test('ranker wave (Phase E3): metadata_boost_gate resolves to always from the bundle and attributes a lexical override; garbage falls through', async () => {
+    const dflt = await buildModesReport(stubEngine({ 'search.mode': 'balanced' }));
+    expect(dflt.resolved.metadata_boost_gate.value).toBe('always');
+    expect(dflt.resolved.metadata_boost_gate.source).toBe('mode');
+    const lexical = await buildModesReport(stubEngine({ 'search.metadata_boost_gate': 'lexical' }));
+    expect(lexical.resolved.metadata_boost_gate.value).toBe('lexical');
+    expect(lexical.resolved.metadata_boost_gate.source).toBe('override');
+    expect(searchCmd.formatModesText(lexical)).toMatch(/metadata_boost_gate\s+= lexical\s+\[/);
+    const garbage = await buildModesReport(stubEngine({ 'search.metadata_boost_gate': 'off' }));
+    expect(garbage.resolved.metadata_boost_gate.value).toBe('always');
+    expect(garbage.resolved.metadata_boost_gate.source).toBe('fallback');
   });
 
   test('ranker wave (R1): relational_rerank_pin resolves to 3 from the bundle and attributes an off override', async () => {

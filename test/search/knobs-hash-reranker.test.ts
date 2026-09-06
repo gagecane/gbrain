@@ -98,6 +98,8 @@ describe('KNOBS_HASH_VERSION + version invariants', () => {
     // epoch, no extra bump: neither part had shipped in a release yet.
     // v=29 ALSO carries kacf= (keyword-arm confidence floor, ranker wave
     // Phase E2 / Cat 13) — same unshipped epoch; null hashes as off.
+    // v=29 ALSO carries mbg= (metadata boost gate, ranker wave Phase E3 /
+    // Cat 13) — same unshipped epoch; a partial literal hashes as always.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
@@ -311,5 +313,16 @@ describe('ranker wave (Phase E2): keyword_arm_confidence_floor participates in t
     expect(knobsHash(baseKnobs())).toBe(off);
     const { keyword_arm_confidence_floor: _drop, ...partial } = baseKnobs();
     expect(knobsHash(partial as ResolvedSearchKnobs)).toBe(off);
+  });
+});
+
+describe('ranker wave (Phase E3): metadata_boost_gate participates in the hash (mbg=)', () => {
+  test('always (bundle) vs lexical → distinct hashes; a partial-knobs literal hashes as always', () => {
+    const always = knobsHash({ ...baseKnobs(), metadata_boost_gate: 'always' });
+    const lexical = knobsHash({ ...baseKnobs(), metadata_boost_gate: 'lexical' });
+    expect(always).not.toBe(lexical);
+    expect(knobsHash(baseKnobs())).toBe(always);
+    const { metadata_boost_gate: _drop, ...partial } = baseKnobs();
+    expect(knobsHash(partial as ResolvedSearchKnobs)).toBe(always);
   });
 });

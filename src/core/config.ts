@@ -1342,6 +1342,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.relational_rerank_pin',
   // Ranker wave (Phase E2): keyword-arm confidence floor — weak keyword arm fuses at half weight (mode.ts reads; `off` | (0, 1]).
   'search.keyword_arm_confidence_floor',
+  // Ranker wave (Phase E3): metadata boost gate — `lexical` skips post-fusion metadata boosts when the vector arm was the only voter (mode.ts reads; `always` | `lexical`).
+  'search.metadata_boost_gate',
   'search.crag_escalation',
   'search.crag_think',
   // Models tier system (v0.31.12)

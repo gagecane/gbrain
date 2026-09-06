@@ -1974,6 +1974,18 @@ export interface HybridSearchMeta {
    */
   keyword_arm_confidence?: import('./search/arm-confidence.ts').KeywordArmConfidenceDecision;
   /**
+   * Ranker wave (Phase E3, Cat 13) — metadata boost gate decision: the
+   * resolved `gate` (`always` | `lexical`), `lexical_voted` (did a strict
+   * keyword, title-arm or relational row reach fusion), `boosts_applied` (did
+   * the backlink / salience / recency / graph-signal / alias-resolved stages
+   * run) and the `reason`. Present on every main RRF-path result — INCLUDING
+   * under `always` (`boosts_applied: true`) — so an operator can count
+   * vector-only-voter queries before flipping `search.metadata_boost_gate`.
+   * Omitted on the keyword-only fallback paths (the lexical arms are the
+   * recall there; the gate is never consulted).
+   */
+  metadata_boost_gate?: import('./search/metadata-boost-gate.ts').MetadataBoostGateDecision;
+  /**
    * v0.32.x (search-lite): token budget enforcement metadata. Omitted when
    * no budget was applied (backward-compatible with pre-search-lite
    * consumers).

@@ -61,6 +61,7 @@ import { stampEvidence, markKeywordHits } from './evidence.ts';
 import { applyExactLookupTier } from './exact-lookup.ts';
 import { pinRelationalRows, normalizeRelationalRerankPin, type RelationalRerankPinDecision } from './relational-rerank-pin.ts';
 import { normalizeKeywordArmConfidenceFloor, type KeywordArmConfidenceDecision } from './arm-confidence.ts';
+import { decideMetadataBoosts, lexicalArmsVoted, normalizeMetadataBoostGate, type MetadataBoostGate } from './metadata-boost-gate.ts';
 import { parseRelationalQuery } from './relational-intent.ts';
 import { expandAnchors, hydrateChunks } from './two-pass.ts';
 import { enforceTokenBudget, searchSalvageEnabled, type TokenBudgetMeta } from './token-budget.ts';
@@ -554,6 +555,16 @@ export interface PostFusionOpts {
    * metadata stages so a title hit can't bury a strong semantic match.
    */
   titleBoost?: number;
+  /**
+   * Ranker wave (Phase E3, Cat 13) — `search.metadata_boost_gate = lexical`
+   * resolved to "the vector arm was the only voter" (metadata-boost-gate.ts).
+   * True skips the metadata-axis stages — backlink, salience, recency (+ the
+   * chronicle type boost inside it), graph signals (incl. its telemetry
+   * sinks), alias-resolved — so hub pages cannot re-order a pure vector
+   * ranking. The title-phrase boost (lexical signal) and the supersede
+   * downrank (correctness) still run. Undefined / false → every stage as before.
+   */
+  skipMetadataBoosts?: boolean;
 }
 
 export async function runPostFusionStages(
@@ -579,9 +590,11 @@ export async function runPostFusionStages(
   // per-stage recompute (which would couple stage order to gating decisions);
   // see plan `swift-sniffing-nygaard.md` D6 / codex outside-voice T2.
   const floorThreshold = computeFloorThreshold(results, opts.floorRatio);
+  // Phase E3 — metadata-axis stages gated as ONE block (see PostFusionOpts).
+  const metadata = opts.skipMetadataBoosts !== true;
 
   // Backlink stage (existing behavior, preserved).
-  if (opts.applyBacklinks) {
+  if (metadata && opts.applyBacklinks) {
     try {
       const pageIds = Array.from(new Set(results.map(r => r.page_id)));
       const counts = await engine.getBacklinkCounts(pageIds);
@@ -599,7 +612,7 @@ export async function runPostFusionStages(
   );
 
   // Salience stage (mattering, no time).
-  if (opts.salience !== 'off') {
+  if (metadata && opts.salience !== 'off') {
     try {
       const scores = await engine.getSalienceScores(refs);
       applySalienceBoost(results, scores, opts.salience, floorThreshold);
@@ -609,7 +622,7 @@ export async function runPostFusionStages(
   }
 
   // Recency stage (per-prefix decay, no mattering).
-  if (opts.recency !== 'off') {
+  if (metadata && opts.recency !== 'off') {
     try {
       const dates = await engine.getEffectiveDates(refs);
       // Resolve the effective decay map (defaults + gbrain.yml `recency:` +
@@ -656,7 +669,7 @@ export async function runPostFusionStages(
   // shares the same floor-threshold so a weak hub gets the same
   // protection v0.35.6.0 added for other metadata boosts. Fail-open at
   // this level matches the per-stage non-fatal contract.
-  if (opts.graphSignalsEnabled) {
+  if (metadata && opts.graphSignalsEnabled) {
     try {
       const { applyGraphSignals } = await import('./graph-signals.ts');
       await applyGraphSignals(results, engine, {
@@ -677,10 +690,12 @@ export async function runPostFusionStages(
   // intent: "user explicitly disambiguated this as canonical." Defense-
   // in-depth: pre-v105 brains don't have slug_aliases table; the lookup
   // throws isUndefinedTableError and the stage no-ops.
-  try {
-    await applyAliasResolvedBoost(results, engine);
-  } catch {
-    // Non-fatal; preserves the per-stage contract.
+  if (metadata) {
+    try {
+      await applyAliasResolvedBoost(results, engine);
+    } catch {
+      // Non-fatal; preserves the per-stage contract.
+    }
   }
 
   // supersession stage — runs LAST so the penalty applies to the fully-boosted
@@ -994,6 +1009,15 @@ export interface HybridSearchOpts extends SearchOpts {
    * in BOTH the inner search and the cache resolver (knobs hash `kacf=`).
    */
   keywordArmConfidenceFloor?: number | null;
+  /**
+   * Per-call override for `search.metadata_boost_gate` (metadata-boost-gate.ts):
+   * `lexical` skips the post-fusion metadata boosts when the vector arm was the
+   * only voter; `always` = today's pipeline. `undefined` → config/bundle;
+   * anything else is unset via the ONE contract `normalizeMetadataBoostGate`.
+   * Threaded through resolveSearchMode in BOTH the inner search and the cache
+   * resolver (knobs hash `mbg=`); eval A/B runs drive it here.
+   */
+  metadataBoostGate?: MetadataBoostGate;
   /** Override default RRF K constant (default: 60). Lower values boost top-ranked results more. */
   rrfK?: number;
   /** Override dedup pipeline parameters. */
@@ -1256,6 +1280,8 @@ export async function hybridSearch(
       relational_rerank_pin: normalizeRelationalRerankPin(opts?.relationalRerankPin),
       // Ranker wave (Phase E2) — keyword-arm confidence floor per-call thread-through.
       keyword_arm_confidence_floor: normalizeKeywordArmConfidenceFloor(opts?.keywordArmConfidenceFloor),
+      // Ranker wave (Phase E3) — metadata boost gate per-call thread-through (eval A/B).
+      metadata_boost_gate: normalizeMetadataBoostGate(opts?.metadataBoostGate),
     },
   });
 
@@ -2131,12 +2157,24 @@ export async function hybridSearch(
     fused = await cosineReScore(engine, fused, queryEmbedding, resolvedCol.name);
   }
 
+  // Phase E3 (Cat 13): metadata boost gate — decided from the SAME lexical
+  // lists composeFusionLists just fused (post relaxed-row demotion); stamped
+  // on meta even under `always` so vector-only-voter queries are countable.
+  const metadataBoostGate = decideMetadataBoosts({
+    gate: resolvedMode.metadata_boost_gate,
+    lexicalVoted: lexicalArmsVoted({
+      keywordFusionList, titleFusionList, relationalList, includeRelational: effectiveModality !== 'image',
+    }),
+  });
+
   // v0.29.1: post-fusion stages (backlink + salience + recency) run via
   // runPostFusionStages so all three early-return paths share the same
   // boost surface. Salience and recency are independent axes — either,
   // both, or neither fires depending on resolved modes.
   if (fused.length > 0) {
-    await runPostFusionStages(engine, fused, postFusionOpts);
+    await runPostFusionStages(engine, fused, {
+      ...postFusionOpts, skipMetadataBoosts: !metadataBoostGate.boosts_applied,
+    });
     // v0.32.x search-lite: intent exact-match boost (entity/event intents).
     // No-op when boost factor is 1.0 (general intent or weighting disabled).
     if (intentWeights.exactMatchBoost !== 1.0) {
@@ -2405,6 +2443,7 @@ export async function hybridSearch(
     ...(relationalSlotDecision ? { relational_evidence_slot: relationalSlotDecision } : {}),
     ...(relationalRerankPin ? { relational_rerank_pin: relationalRerankPin } : {}),
     ...(keywordArmConfidence ? { keyword_arm_confidence: keywordArmConfidence } : {}),
+    metadata_boost_gate: metadataBoostGate,
   });
   return budgeted;
 }
@@ -2527,6 +2566,8 @@ export async function hybridSearchCached(
       relational_rerank_pin: normalizeRelationalRerankPin(opts?.relationalRerankPin),
       // Ranker wave (Phase E2) — threaded here too so knobsHash's `kacf=` part reflects the per-call floor.
       keyword_arm_confidence_floor: normalizeKeywordArmConfidenceFloor(opts?.keywordArmConfidenceFloor),
+      // Ranker wave (Phase E3) — threaded here too so knobsHash's `mbg=` part reflects the per-call gate.
+      metadata_boost_gate: normalizeMetadataBoostGate(opts?.metadataBoostGate),
     },
   });
   // v0.36 (D8 / CDX-2 + codex /ship #4): resolve column for the cache

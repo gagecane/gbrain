@@ -56,6 +56,16 @@ describe('ranker wave (Phase E2) — search.keyword_arm_confidence_floor is regi
   });
 });
 
+describe('ranker wave (Phase E3) — search.metadata_boost_gate is registered (config plane is not a no-op)', () => {
+  // mode.ts reads it in loadOverridesFromConfig; without this row
+  // `gbrain config set search.metadata_boost_gate lexical` (the Cat 13
+  // metadata boost gate) is rejected and the documented knob is unreachable —
+  // the exact E5a regression class.
+  test('search.metadata_boost_gate is in KNOWN_CONFIG_KEYS', () => {
+    expect(KNOWN_CONFIG_KEYS).toContain('search.metadata_boost_gate');
+  });
+});
+
 describe('GBRAIN_RETRIEVAL_REFLEX_VOLUNTEER loadConfig env fold (ship review)', () => {
   // volunteerEnabled() reads env directly (config-less-environment escape
   // hatch, tested in reflex-volunteer.test.ts); this pins the SEPARATE

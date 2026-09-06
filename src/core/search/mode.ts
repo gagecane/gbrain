@@ -34,6 +34,11 @@ import { DEFAULT_RERANKER_MODEL } from '../ai/defaults.ts';
 import { normalizeExpansionVariantBudget } from './fusion-lists.ts';
 import { DEFAULT_RELATIONAL_RERANK_PIN, normalizeRelationalRerankPin } from './relational-rerank-pin.ts';
 import { normalizeKeywordArmConfidenceFloor } from './arm-confidence.ts';
+import {
+  DEFAULT_METADATA_BOOST_GATE,
+  normalizeMetadataBoostGate,
+  type MetadataBoostGate,
+} from './metadata-boost-gate.ts';
 
 /**
  * Look up the `reranker.default_timeout_ms` declared by the resolved
@@ -389,6 +394,28 @@ export interface ModeBundle {
    * `search.keyword_arm_confidence_floor` config (`off` = null) → bundle.
    */
   keyword_arm_confidence_floor: number | null;
+  /**
+   * Ranker wave (Phase E3, Cat 13) — post-fusion METADATA boost gate
+   * (metadata-boost-gate.ts). `always` = today's pipeline: backlink, salience,
+   * recency (+ chronicle), graph-signal and alias-resolved boosts run on every
+   * query. `lexical` = those stages run ONLY when a lexical arm voted in fusion
+   * (a strict keyword row, a title-arm row or a relational row reached
+   * composeFusionLists after the relaxed-row demotion); when the vector arm was
+   * the only voter they are skipped and the vector order stands. Untouched
+   * either way: supersede downrank, exact-match boost, title-phrase boost,
+   * compiled-truth boost, cosine re-score, dedup, reranker, autocut.
+   * Receipt (Cat 13 E1 localization, tuning split): gbrain's own vector arm
+   * nDCG@5 60.3 vs live hybrid 50.6; 73/105 gap probes had BOTH lexical arms
+   * empty while hub pages carried backlink / graph-adjacency / recency boosts
+   * of 1.035–1.124x that the gold concept page never carried (0/96); the gate
+   * fixes 73/105 with 0 collateral (tuning 57.3). Every bundle lands at
+   * `always`; the pre-registered Phase E3 held-out rule (nDCG@5 ≥ 57.0, no
+   * NamedThingBench / canary / BrainBench / LME movement) decides the flip.
+   * Parse contract in ONE place: `normalizeMetadataBoostGate`. Override:
+   * per-call HybridSearchOpts.metadataBoostGate → `search.metadata_boost_gate`
+   * config → bundle. Folded into knobsHash as `mbg=`.
+   */
+  metadata_boost_gate: MetadataBoostGate;
 }
 
 /**
@@ -451,6 +478,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     autocut_min_keep: 1,
     // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
     keyword_arm_confidence_floor: null,
+    // Phase E3 — metadata boost gate: `always` (today's pipeline) until the Cat 13 held-out receipt.
+    metadata_boost_gate: 'always',
   }),
   balanced: Object.freeze({
     cache_enabled: true,
@@ -519,6 +548,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     autocut_min_keep: 1,
     // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
     keyword_arm_confidence_floor: null,
+    // Phase E3 — metadata boost gate: `always` (today's pipeline) until the Cat 13 held-out receipt.
+    metadata_boost_gate: 'always',
   }),
   tokenmax: Object.freeze({
     cache_enabled: true,
@@ -579,6 +610,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     autocut_min_keep: 1,
     // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
     keyword_arm_confidence_floor: null,
+    // Phase E3 — metadata boost gate: `always` (today's pipeline) until the Cat 13 held-out receipt.
+    metadata_boost_gate: 'always',
   }),
 });
 
@@ -639,6 +672,8 @@ export interface SearchKeyOverrides {
   relational_rerank_pin?: number;
   // Ranker wave (Phase E2) — keyword-arm confidence floor override (null = off; (0, 1]).
   keyword_arm_confidence_floor?: number | null;
+  // Ranker wave (Phase E3) — metadata boost gate override (`always` | `lexical`).
+  metadata_boost_gate?: MetadataBoostGate;
   autocut_jump?: number;
   autocut_min_top?: number;
   autocut_min_keep?: number;
@@ -701,6 +736,8 @@ export interface SearchPerCallOpts {
   relational_rerank_pin?: number;
   // Ranker wave (Phase E2) — keyword-arm confidence floor per-call override (null = off; (0, 1]).
   keyword_arm_confidence_floor?: number | null;
+  // Ranker wave (Phase E3) — metadata boost gate per-call override (`always` | `lexical`).
+  metadata_boost_gate?: MetadataBoostGate;
 }
 
 /**
@@ -803,6 +840,7 @@ export function resolveSearchMode(input: ResolveSearchModeInput): ResolvedSearch
     relational_retrieval_depth: pick('relational_retrieval_depth'),
     relational_rerank_pin: pick('relational_rerank_pin'),
     keyword_arm_confidence_floor: pick('keyword_arm_confidence_floor'),
+    metadata_boost_gate: pick('metadata_boost_gate'),
     resolved_mode,
     mode_valid: valid,
   };
@@ -1072,6 +1110,13 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // on a weak keyword arm reorders the fused page for identical other knobs, so
 // a floor-0.6 write must never serve a floor-off lookup (and vice versa).
 // `null` hashes as `kacf=off`; appended after `rrp=`, same unshipped epoch.
+//
+// v=29 ALSO carries `mbg=` (ranker wave Phase E3, same release): the
+// metadata_boost_gate knob. Under `lexical`, vector-only-voter queries skip
+// the post-fusion metadata boosts and the fused page is re-ordered for
+// identical other knobs, so a `lexical` write must never serve an `always`
+// lookup (and vice versa). A partial-knobs literal hashes as `mbg=always`;
+// appended after `kacf=`, same unshipped epoch — no extra bump.
 export const KNOBS_HASH_VERSION = 29;
 
 /**
@@ -1346,6 +1391,11 @@ export function knobsHash(
     // floor write must never serve a floor-off lookup. `== null` keeps a
     // partial-knobs literal (and the all-null bundles) hashing as `off`.
     `kacf=${knobs.keyword_arm_confidence_floor == null ? 'off' : knobs.keyword_arm_confidence_floor.toFixed(3)}`,
+    // v=29 addition (ranker wave Phase E3, append-only): metadata boost gate.
+    // `lexical` skips the metadata boosts on vector-only-voter queries and
+    // re-orders the fused page, so a `lexical` write must never serve an
+    // `always` lookup. A partial-knobs literal hashes as the bundle default.
+    `mbg=${knobs.metadata_boost_gate ?? DEFAULT_METADATA_BOOST_GATE}`,
   ];
   const h = createHash('sha256');
   h.update(parts.join('|'));
@@ -1579,6 +1629,15 @@ export function loadOverridesFromConfig(
     const n = normalizeKeywordArmConfidenceFloor(kacf);
     if (n !== undefined) out.keyword_arm_confidence_floor = n;
   }
+  // Ranker wave (Phase E3) — metadata boost gate: the literals `always` /
+  // `lexical` (any case); anything else falls through to the bundle. ONE
+  // parse contract with the per-call seams in hybrid.ts:
+  // normalizeMetadataBoostGate (metadata-boost-gate.ts).
+  const mbg = get('search.metadata_boost_gate');
+  if (mbg !== undefined) {
+    const g = normalizeMetadataBoostGate(mbg);
+    if (g !== undefined) out.metadata_boost_gate = g;
+  }
 
   return out;
 }
@@ -1628,6 +1687,8 @@ export const SEARCH_MODE_CONFIG_KEYS: ReadonlyArray<string> = Object.freeze([
   'search.relational_rerank_pin',
   // Ranker wave (Phase E2) keyword-arm confidence floor
   'search.keyword_arm_confidence_floor',
+  // Ranker wave (Phase E3) metadata boost gate
+  'search.metadata_boost_gate',
   'search.autocut_jump',
   'search.autocut_min_top',
   'search.autocut_min_keep',

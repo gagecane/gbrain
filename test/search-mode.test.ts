@@ -90,6 +90,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       relational_rerank_pin: 3,
       // ranker wave (Phase E2) — keyword-arm confidence floor OFF in every bundle until the Cat 13 receipt.
       keyword_arm_confidence_floor: null,
+      // ranker wave (Phase E3) — metadata boost gate `always` (today's pipeline) in every bundle until the Cat 13 held-out receipt.
+      metadata_boost_gate: 'always',
     });
   });
 
@@ -131,6 +133,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       relational_rerank_pin: 3,
       // ranker wave (Phase E2) — keyword-arm confidence floor OFF in every bundle until the Cat 13 receipt.
       keyword_arm_confidence_floor: null,
+      // ranker wave (Phase E3) — metadata boost gate `always` (today's pipeline) in every bundle until the Cat 13 held-out receipt.
+      metadata_boost_gate: 'always',
     });
   });
 
@@ -170,6 +174,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       relational_rerank_pin: 3,
       // ranker wave (Phase E2) — keyword-arm confidence floor OFF in every bundle until the Cat 13 receipt.
       keyword_arm_confidence_floor: null,
+      // ranker wave (Phase E3) — metadata boost gate `always` (today's pipeline) in every bundle until the Cat 13 held-out receipt.
+      metadata_boost_gate: 'always',
     });
   });
 
@@ -478,6 +484,8 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // epoch, no extra bump: neither part had shipped in a release yet.
     // v=29 ALSO carries kacf= (keyword-arm confidence floor, ranker wave
     // Phase E2 / Cat 13) — same unshipped epoch; null hashes as off.
+    // v=29 ALSO carries mbg= (metadata boost gate, ranker wave Phase E3 /
+    // Cat 13) — same unshipped epoch; a partial literal hashes as always.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
@@ -514,6 +522,8 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // epoch, no extra bump: neither part had shipped in a release yet.
     // v=29 ALSO carries kacf= (keyword-arm confidence floor, ranker wave
     // Phase E2 / Cat 13) — same unshipped epoch; null hashes as off.
+    // v=29 ALSO carries mbg= (metadata boost gate, ranker wave Phase E3 /
+    // Cat 13) — same unshipped epoch; a partial literal hashes as always.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
@@ -737,6 +747,8 @@ describe('v0.42.3.0 — autocut knobs', () => {
     // epoch, no extra bump: neither part had shipped in a release yet.
     // v=29 ALSO carries kacf= (keyword-arm confidence floor, ranker wave
     // Phase E2 / Cat 13) — same unshipped epoch; null hashes as off.
+    // v=29 ALSO carries mbg= (metadata boost gate, ranker wave Phase E3 /
+    // Cat 13) — same unshipped epoch; a partial literal hashes as always.
     expect(KNOBS_HASH_VERSION).toBe(29);
   });
 
