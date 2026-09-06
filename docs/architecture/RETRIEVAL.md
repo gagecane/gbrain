@@ -241,7 +241,8 @@ shipped `balanced` default, `voyage:rerank-2.5`,
 the reranker on and no pin, hit@1 fell from 21/39 to 3/39 (19 paired losses)
 and hit@3 from 27/39 to 5/39 (22 paired losses), while the 11 non-relational
 core questions showed 0 losses. With the pin at its default 3 — measured with
-autocut on, the shipped shape — the same paired comparison shows 0 hit@1 and
+`--autocut on`, the shape that shipped before rule R2 turned autocut off — the
+same paired comparison shows 0 hit@1 and
 0 hit@3 losses (21/39 and 27/39, the reranker-off numbers) and the 11 core
 questions unchanged, which is why the balanced reranker stays on.
 `pinRelationalRows`

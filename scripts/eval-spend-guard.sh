@@ -2,11 +2,14 @@
 # scripts/eval-spend-guard.sh — hard spend cap for paid eval runs.
 #
 # INVARIANT: a paid command never launches when (ledger total + estimate) would
-# exceed the cap, and every launch is appended to the ledger whether or not it
-# succeeded — so the running total can only ever UNDER-state spend if the
+# exceed the cap, and the money is on the ledger BEFORE it can be spent: a
+# reservation row (cost = estimate) is appended before the command starts, so a
+# concurrent guard, a SIGKILLed guard, a crashed host, or a Ctrl-C all leave
+# the spend counted. The running total can only ever UNDER-state spend if the
 # command itself lies about its cost. The guard FAILS CLOSED on anything it
 # cannot account for: a missing ledger, an unparseable ledger line, a signed or
-# malformed amount. No jq / bun dependency at runtime.
+# malformed amount, a ledger it cannot append to. No jq / bun dependency at
+# runtime.
 #
 # Usage:
 #   scripts/eval-spend-guard.sh <cap_usd> <estimate_usd> -- <command...>
@@ -23,17 +26,32 @@
 # Every non-empty line must parse (`{…"cost_usd":<number>…}`); otherwise the
 # guard names the offending line numbers and refuses to launch (exit 3).
 #
-# After the command exits, this appends:
-#   {"ts":"<UTC ISO>","estimate_usd":E,"cost_usd":C,"exit_code":N,"command":"..."}
-# where C comes from $GBRAIN_EVAL_ACTUAL_COST_FILE when the command wrote one
-# (a bare unsigned number, or a JSON object carrying `cost_usd`) AND it is
+# Rows. Every launch writes TWO rows that share a unique run_id:
+#   reservation — appended BEFORE the command starts, counted at the estimate:
+#     {"ts":"<UTC ISO>","run_id":"<id>","status":"running","estimate_usd":E,"cost_usd":E,"exit_code":null,"command":"..."}
+#   reconciliation — appended after it exits, supersedes the reservation:
+#     {"ts":"<UTC ISO>","run_id":"<id>","status":"done","estimate_usd":E,"cost_usd":C,"exit_code":N,"command":"..."}
+# Ledger total = every row that is not a reservation + every reservation whose
+# run_id has no reconciliation (a run still in flight, or one whose guard died
+# before it could reconcile). Rows without run_id/status (older ledgers) are
+# final rows. C comes from $GBRAIN_EVAL_ACTUAL_COST_FILE when the command wrote
+# one (a bare unsigned number, or a JSON object carrying `cost_usd`) AND it is
 # positive; a malformed, signed, or non-positive cost falls back to the
 # estimate (over-stating spend is the safe direction). When
 # GBRAIN_EVAL_ACTUAL_COST_FILE is unset, a temp path is exported to the child
 # so harnesses can report usage-derived cost without operator setup.
 #
-# Exit codes: the wrapped command's exit code · 2 usage error · 3 refused
-# (cap exceeded, ledger missing, or ledger unparseable).
+# Signals: on INT/TERM/HUP the guard sends SIGTERM to the command, waits for
+# it, reconciles at the ESTIMATE with exit_code 128+N, and exits 128+N. An EXIT
+# trap reconciles at the estimate on any other early exit. SIGKILL cannot be
+# trapped — the reservation row is what keeps that spend counted. If the
+# reconciliation append itself fails the guard says so and exits 3; the
+# reservation stays on the books. Where `flock` exists, audit → cap check →
+# reservation is serialized across concurrent guards via <ledger>.lock.
+#
+# Exit codes: the wrapped command's exit code (128+N when the guard was
+# signalled) · 2 usage error · 3 refused (cap exceeded, ledger missing,
+# unparseable, or unwritable).
 
 set -u
 
@@ -82,48 +100,92 @@ fi
 # Audit + sum the ledger in one awk pass (no jq). A line counts ONLY when it
 # is a complete JSON object (`{…}`) carrying an UNSIGNED numeric cost_usd
 # followed by `,` or `}` — a truncated tail, a string-typed cost, a signed
-# cost, or junk all count as unparseable. Prints: <lines> <parsed> <sum> <bad-line-list>
+# cost, or junk all count as unparseable. A `"status":"running"` row with a
+# run_id is a reservation: it is summed only while no other row carries the
+# same run_id. Prints: <lines> <parsed> <sum> <open-reservations> <bad-line-list>
 ledger_audit() {
   awk '
     /^[[:space:]]*$/ { next }
     {
       n++
-      ok = 0
-      if ($0 ~ /^[[:space:]]*\{.*\}[[:space:]]*$/ &&
-          match($0, /"cost_usd"[[:space:]]*:[[:space:]]*([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?[[:space:]]*[,}]/)) {
-        tok = substr($0, RSTART, RLENGTH)
-        sub(/^"cost_usd"[[:space:]]*:[[:space:]]*/, "", tok)
-        sub(/[[:space:]]*[,}]$/, "", tok)
-        s += tok + 0
-        ok = 1
+      if (!($0 ~ /^[[:space:]]*\{.*\}[[:space:]]*$/ &&
+            match($0, /"cost_usd"[[:space:]]*:[[:space:]]*([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?[[:space:]]*[,}]/))) {
+        badn++; bad = bad (bad == "" ? "" : ",") NR
+        next
       }
-      if (!ok) { badn++; bad = bad (bad == "" ? "" : ",") NR }
+      tok = substr($0, RSTART, RLENGTH)
+      sub(/^"cost_usd"[[:space:]]*:[[:space:]]*/, "", tok)
+      sub(/[[:space:]]*[,}]$/, "", tok)
+      c = tok + 0
+      id = ""
+      if (match($0, /"run_id"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+        id = substr($0, RSTART, RLENGTH)
+        sub(/^"run_id"[[:space:]]*:[[:space:]]*"/, "", id)
+        sub(/"$/, "", id)
+      }
+      if (id != "" && $0 ~ /"status"[[:space:]]*:[[:space:]]*"running"/) {
+        reserved[id] += c
+      } else {
+        s += c
+        if (id != "") done[id] = 1
+      }
     }
-    END { printf "%d %d %.6f %s\n", n + 0, n - badn, s + 0, bad }
+    END {
+      for (id in reserved) if (!(id in done)) { s += reserved[id]; open++ }
+      printf "%d %d %.6f %d %s\n", n + 0, n - badn, s + 0, open + 0, bad
+    }
   ' "$1"
 }
 
-AUDIT="$(ledger_audit "$LEDGER")"
-LINES="${AUDIT%% *}"; REST="${AUDIT#* }"
-PARSED="${REST%% *}"; REST="${REST#* }"
-TOTAL="${REST%% *}"; BAD="${REST#* }"
-[ "$BAD" = "$TOTAL" ] && BAD=""   # no fourth field → awk printed nothing after the sum
-if [ "$LINES" != "$PARSED" ]; then
+refuse_unparseable() {
   echo "eval-spend-guard: REFUSED — ledger $LEDGER has $((LINES - PARSED)) unparseable line(s) out of $LINES (line numbers: $BAD)" >&2
   echo "eval-spend-guard: every line must be a complete JSON object with an unsigned numeric cost_usd; repair or remove the offending lines — never guess spend" >&2
   echo "eval-spend-guard: command NOT run: $*" >&2
   exit 3
+}
+
+# Serialize audit → cap check → reservation across concurrent guards where
+# flock exists; elsewhere the reservation row still shrinks the race from the
+# command's whole runtime to the instant between the read and the append.
+LOCK="$LEDGER.lock"
+if command -v flock >/dev/null 2>&1 && ( : >> "$LOCK" ) 2>/dev/null && exec 9>>"$LOCK"; then
+  flock -w 60 9 || { echo "eval-spend-guard: REFUSED — could not lock $LOCK within 60s (another guard holds it); command NOT run: $*" >&2; exit 3; }
 fi
+
+AUDIT="$(ledger_audit "$LEDGER")"
+read -r LINES PARSED TOTAL OPEN BAD <<< "$AUDIT"
+[ "$LINES" = "$PARSED" ] || refuse_unparseable "$@"
 
 PROJECTED="$(awk -v a="$TOTAL" -v b="$EST" 'BEGIN { printf "%.6f", a + b }')"
 OVER="$(awk -v p="$PROJECTED" -v c="$CAP" 'BEGIN { print (p > c) ? 1 : 0 }')"
 
 if [ "$OVER" = "1" ]; then
   echo "eval-spend-guard: REFUSED — ledger \$${TOTAL} + estimate \$${EST} = \$${PROJECTED} exceeds cap \$${CAP} (ledger: $LEDGER)" >&2
+  [ "$OPEN" != "0" ] && echo "eval-spend-guard: $OPEN in-flight reservation(s) counted at their estimate (a concurrent run, or a guard that died before reconciling)" >&2
   echo "eval-spend-guard: command NOT run: $*" >&2
   exit 3
 fi
 echo "eval-spend-guard: ledger \$${TOTAL} ($LINES row(s)) + estimate \$${EST} = \$${PROJECTED} <= cap \$${CAP}; launching" >&2
+[ "$OPEN" != "0" ] && echo "eval-spend-guard: $OPEN in-flight reservation(s) counted at their estimate" >&2
+
+# JSON-escape the command (backslash, quote, control chars) without jq.
+CMD_JSON="$(printf '%s' "$*" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }')"
+RUN_ID="$(uuidgen 2>/dev/null || printf '%s-%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$$" "$RANDOM$RANDOM")"
+
+append_row() {  # <status> <cost> <exit_code|null>; non-zero when the append fails
+  printf '{"ts":"%s","run_id":"%s","status":"%s","estimate_usd":%s,"cost_usd":%s,"exit_code":%s,"command":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_ID" "$1" "$EST" "$2" "$3" "$CMD_JSON" >> "$LEDGER"
+}
+
+# Reservation first: a launch that is not on the books is a cap that cannot be
+# enforced against it, so an unwritable ledger refuses the launch.
+if ! append_row running "$EST" null; then
+  echo "eval-spend-guard: REFUSED — cannot append the reservation row to ledger $LEDGER" >&2
+  echo "eval-spend-guard: command NOT run: $*" >&2
+  exit 3
+fi
+exec 9>&-   # release the lock (if held) before the command starts
+echo "eval-spend-guard: reserved \$${EST} (run $RUN_ID)" >&2
 
 # Cost file: honor the operator's path or hand the child a scratch one.
 CLEANUP_COST_FILE=0
@@ -134,8 +196,41 @@ if [ -z "${GBRAIN_EVAL_ACTUAL_COST_FILE:-}" ]; then
 fi
 export GBRAIN_EVAL_ACTUAL_COST_FILE
 
-"$@"
+# Reconcile exactly once (normal exit, signal, or EXIT-trap backstop).
+RECONCILED=0
+reconcile() {  # <cost> <exit_code>; returns 1 when the ledger append fails
+  [ "$RECONCILED" = "1" ] && return 0
+  RECONCILED=1
+  [ "$CLEANUP_COST_FILE" = "1" ] && rm -f "$GBRAIN_EVAL_ACTUAL_COST_FILE"
+  if ! append_row done "$1" "$2"; then
+    echo "eval-spend-guard: FAILED to append the reconciliation row to $LEDGER — the \$${EST} reservation for run $RUN_ID stays on the books" >&2
+    return 1
+  fi
+  AFTER="$(ledger_audit "$LEDGER")"; read -r _ _ AFTER _ <<< "$AFTER"
+  echo "eval-spend-guard: recorded cost \$${1} (exit $2); ledger now \$${AFTER}" >&2
+}
+
+CHILD=""
+on_signal() {  # <signal number>
+  trap - INT TERM HUP
+  echo "eval-spend-guard: interrupted (signal $1) — stopping the command and recording the estimate" >&2
+  if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; fi
+  reconcile "$EST" "$((128 + $1))" || exit 3
+  exit "$((128 + $1))"
+}
+on_exit() { reconcile "$EST" "$1" || exit 3; }
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap 'on_signal 1' HUP
+trap 'on_exit $?' EXIT
+
+# Run the command as a job so a trapped signal interrupts `wait` (a foreground
+# child would defer the trap until it exited). `<&0` keeps the child's stdin.
+"$@" <&0 &
+CHILD=$!
+wait "$CHILD"
 CODE=$?
+trap - INT TERM HUP
 
 # Actual cost: bare unsigned number or JSON with unsigned cost_usd, and it
 # must be POSITIVE; anything else (malformed, signed, zero) → the estimate.
@@ -162,14 +257,6 @@ if [ -f "$GBRAIN_EVAL_ACTUAL_COST_FILE" ]; then
     echo "eval-spend-guard: cost file $GBRAIN_EVAL_ACTUAL_COST_FILE unreadable (need an unsigned number or {\"cost_usd\":<number>}); recording the estimate" >&2
   fi
 fi
-[ "$CLEANUP_COST_FILE" = "1" ] && rm -f "$GBRAIN_EVAL_ACTUAL_COST_FILE"
 
-# JSON-escape the command (backslash, quote, control chars) without jq.
-CMD_JSON="$(printf '%s' "$*" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }')"
-TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '{"ts":"%s","estimate_usd":%s,"cost_usd":%s,"exit_code":%s,"command":"%s"}\n' \
-  "$TS" "$EST" "$COST" "$CODE" "$CMD_JSON" >> "$LEDGER"
-AFTER="$(ledger_audit "$LEDGER")"; AFTER="${AFTER#* }"; AFTER="${AFTER#* }"; AFTER="${AFTER%% *}"
-echo "eval-spend-guard: recorded cost \$${COST} (exit $CODE); ledger now \$${AFTER}" >&2
-
+reconcile "$COST" "$CODE" || exit 3
 exit "$CODE"

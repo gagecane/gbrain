@@ -37,10 +37,14 @@ command runs through `scripts/eval-spend-guard.sh 75 <estimate> -- …`
   `recall_all_hit` with the sibling receipt (gbrain-evals `main`, the
   2026-09-02 hybrid ndjson).
 - **A1 parity gate (full 470, hybrid, `--reranker off --autocut off`):**
-  pending. Rule: ≥ 465/470 rows agree on `recall_all_hit` with the sibling's
+  PASS — 439/470 strict `recall_all@5` (93.40%) against the sibling
+  receipt's 438/470; 469 of 470 rows agree on `recall_all_hit`; any-hit
+  identical at 464/470; per-type identical except temporal-reasoning 108 vs
+  107 (one question flipped to a hit without a shared embedding cache).
+  Reranker-on companion: 449/470 (95.53%) with the same +18 / −8 paired
+  pattern as the receipt. Rule was: ≥ 465/470 rows agree with the sibling's
   hybrid ndjson AND the count is within ±2 of 438; every disagreeing
-  `question_id` is itemized with per-arm ranks. No ranking default moves
-  before this passes.
+  `question_id` is itemized with per-arm ranks.
 - **R1 — NamedThingBench balanced reranker ON vs OFF
   (`scripts/r1-namedthing-rerank-ab.ts --relational`, `voyage:rerank-2.5`,
   paired per query, one in-memory brain, embed cache pinned):** core 11
@@ -49,7 +53,8 @@ command runs through `scripts/eval-spend-guard.sh 75 <estimate> -- …`
   21/39 → 3/39 (19 losses), hit@3 27/39 → 5/39 (22 losses) — a
   shipped-default regression the reranker flip had never measured. With
   `search.relational_rerank_pin=3` (the new bundle default; measured with
-  `--autocut on`, the shipped shape): PASS — 0 hit@1 / 0 hit@3 losses,
+  `--autocut on`, the shape that shipped before rule R2 turned autocut
+  off): PASS — 0 hit@1 / 0 hit@3 losses,
   21/39 and 27/39, core unchanged. Balanced reranker stays ON.
 - **Cat 13 conceptual recall (sibling repo, Voyage space, 20 tuning / 10
   held-out concepts, seed 42):** E0 reproduced the gap — held-out nDCG@5 bare
@@ -97,9 +102,9 @@ $G 1 -- bun run src/cli.ts eval longmemeval $DS $COMMON --mode balanced --rerank
   --question-ids evals/longmemeval/dev-slice-seed42.txt --output ~/gbrain-lme-receipts/dev-A1.ndjson
 $G 3 -- bun run src/cli.ts eval longmemeval $DS $COMMON --mode balanced --reranker off --autocut off --output ~/gbrain-lme-receipts/A1.ndjson
 
-# R1 (needs VOYAGE_API_KEY + the embedder key). The pin is not a script flag: it resolves from the bundle
-# default (3) exactly as production does, so the no-pin cell is reproduced only from a checkout that
-# predates src/core/search/relational-rerank-pin.ts.
+# R1 (needs VOYAGE_API_KEY + the embedder key). --relational-pin N|off overlays search.relational_rerank_pin
+# on BOTH arms: the no-pin cell is --relational-pin off (or 0); omitting the flag is the default cell, which
+# resolves the bundle default (3) exactly as production does.
 bun run scripts/r1-namedthing-rerank-ab.ts --relational --autocut on \
   --embed-cache ~/.cache/gbrain-eval/lme.sqlite --out ~/gbrain-lme-receipts/r1-namedthing-receipt.json
 
@@ -108,7 +113,7 @@ for B in 2.0 1.0 0.5 0.25; do $G 1 -- bun run src/cli.ts eval longmemeval $DS $C
   --expansion --expansion-replay ~/gbrain-lme-receipts/A3.ndjson --expansion-variant-budget $B \
   --question-ids evals/longmemeval/dev-slice-seed42.txt --output ~/gbrain-lme-receipts/dev-b$B.ndjson; done
 
-# Autocut replay from the A4 capture (A4 = --reranker on --autocut on --capture-pool, the shipped balanced default).
+# Autocut replay from the A4 capture (A4 = --reranker on --autocut on --capture-pool: the balanced shape that shipped before rule R2 turned autocut off).
 bun run scripts/replay-autocut-floor.ts ~/gbrain-lme-receipts/A4.ndjson \
   --floors off,0.10,0.20,0.35,0.50,0.65,0.80 --validate-live 0.35 --split-half seed42
 

@@ -21,7 +21,7 @@
  *   - backfill to a different --output copies the prior rows forward.
  */
 import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import type Anthropic from '@anthropic-ai/sdk';
@@ -436,8 +436,62 @@ describe('judge_config_hash gate on resume (D33)', () => {
     expect(allowed.stderr).toContain('Continuing (--allow-mixed-run-config)');
     expect(j2.calls).toHaveLength(0); // verdicts stand; nothing to re-judge
     const qa = splitRows(out).summary.qa_accuracy;
-    expect(qa.mixed_judge_config).toBe(true);
+    // Every row still carries h1 → the file is homogeneous: NOT mixed, and the
+    // published hash is the one the rows were judged under, not this run's.
+    expect(qa.mixed_judge_config).toBe(false);
+    expect(qa.judge_config_hash).toBe(h1);
     expect(qa.judge_model).toBe('openai:gpt-4o-mini');
     expect(qa.judged).toBe(3);
+
+    // Strip one verdict so the gpt-4o-mini lane judges exactly that row:
+    // 2 rows under h1 + 1 under the new hash → genuinely mixed.
+    const stripped = splitRows(out).rows.map(r => (r.question_id === 'mc-3_abs' ? Object.fromEntries(Object.entries(r).filter(([k]) => !k.startsWith('judge_'))) : r));
+    writeFileSync(out, stripped.map(r => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+    const j3 = judgeClient({ 'mc-3_abs': 'Yes' });
+    const mixed = await runCapturing(
+      [FIXTURE, ...BASE, ...JUDGE, '--judge-model', 'openai:gpt-4o-mini', '--output', out, '--resume-from', out, '--allow-mixed-run-config'],
+      { engine, client: readerClient({ forbid: true }).client, judgeClient: j3.fn },
+    );
+    expect(mixed.code).toBeNull();
+    expect(j3.calls.map(c => c.qid)).toEqual(['mc-3_abs']);
+    const after = splitRows(out);
+    expect(new Set(after.rows.map(r => r.judge_config_hash)).size).toBe(2);
+    expect(after.summary.qa_accuracy.mixed_judge_config).toBe(true);
+    expect(after.summary.qa_accuracy.judged).toBe(3);
+    expect(after.summary.qa_accuracy.complete).toBe(true);
+  }, 120_000);
+});
+
+describe('--judge publishability gate reads qa.complete (unjudged rows count)', () => {
+  test('a prior row with an empty hypothesis and no error is "done" for the reader but unjudgeable → complete:false, exit 1 naming unjudged; --allow-incomplete-judgments → WARN, exit 0', async () => {
+    const out = join(tmp, 'unjudged.jsonl');
+    const write = () => writeFileSync(out, readRows(FIXTURE).map(q => JSON.stringify({
+      question_id: q.question_id, question: q.question, question_type: q.question_type,
+      hypothesis: q.question_id === 'mc-3_abs' ? '' : ANSWERS[q.question_id],
+    })).join('\n') + '\n', 'utf8');
+    write();
+    const j1 = judgeClient({ 'mc-1': 'Yes', 'mc-2': 'Yes' });
+    const failed = await runCapturing(
+      [FIXTURE, ...BASE, ...JUDGE, '--output', out, '--resume-from', out],
+      { engine, client: readerClient({ forbid: true }).client, judgeClient: j1.fn },
+    );
+    expect(failed.code).toBe(1);
+    expect(j1.calls.map(c => c.qid).sort()).toEqual(['mc-1', 'mc-2']);
+    expect(failed.stderr).toContain('FAIL --judge: judgments incomplete (judge_errors 0, skipped_budget 0, unjudged 1)');
+    const qa = splitRows(out).summary.qa_accuracy;
+    expect(qa.complete).toBe(false);
+    expect(qa.unjudged).toBe(1);
+    expect(qa.judged).toBe(2);
+    expect(qa.judge_errors).toBe(0);
+
+    write();
+    const j2 = judgeClient({ 'mc-1': 'Yes', 'mc-2': 'Yes' });
+    const warned = await runCapturing(
+      [FIXTURE, ...BASE, ...JUDGE, '--allow-incomplete-judgments', '--output', out, '--resume-from', out],
+      { engine, client: readerClient({ forbid: true }).client, judgeClient: j2.fn },
+    );
+    expect(warned.code).toBeNull();
+    expect(warned.stderr).toContain('WARN --judge: judgments incomplete (judge_errors 0, skipped_budget 0, unjudged 1)');
+    expect(splitRows(out).summary.qa_accuracy.complete).toBe(false);
   }, 120_000);
 });

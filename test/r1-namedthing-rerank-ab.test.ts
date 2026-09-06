@@ -19,6 +19,7 @@ import {
   ARM_PINS,
   R1_GLOSSARY_KEYS,
   R1_ON_RERANKER_MODEL,
+  SEARCH_PIN_RESERVED,
   applyArmPins,
   embedIntegrityProblems,
   onArmIntegrityProblems,
@@ -98,6 +99,20 @@ describe('OFF arm (stubbed embed) reproduces the CI gate through the arm runner'
     expect(ARM_PINS.on['search.reranker.model']).toBe(R1_ON_RERANKER_MODEL);
     expect(ARM_PINS.on['search.autocut']).toBe('false');
     expect(ARM_PINS.off['search.autocut']).toBe('false');
+  });
+
+  test('an overlay lands on top of the arm pins (and the reserved keys are exactly the arm axis)', async () => {
+    await applyArmPins(engine, 'off', { 'search.autocut': 'true', 'search.relational_rerank_pin': '3' });
+    expect(await engine.getConfig('search.autocut')).toBe('true');
+    expect(await engine.getConfig('search.relational_rerank_pin')).toBe('3');
+    expect(await engine.getConfig('search.reranker.enabled')).toBe('false');
+    await applyArmPins(engine, 'off'); // restore the pinned OFF shape for the sibling tests
+    expect(await engine.getConfig('search.autocut')).toBe('false');
+    // Every key the two arms differ on is reserved from --search-pin; every shared key is not.
+    const onOnly = Object.keys(ARM_PINS.on).filter(k => ARM_PINS.on[k] !== ARM_PINS.off[k]);
+    expect(onOnly.length).toBeGreaterThan(0);
+    for (const k of onOnly) expect(SEARCH_PIN_RESERVED.test(k)).toBe(true);
+    for (const k of Object.keys(ARM_PINS.off).filter(k => ARM_PINS.on[k] === ARM_PINS.off[k])) expect(SEARCH_PIN_RESERVED.test(k)).toBe(false);
   });
 
   test('gate + the incident families hold, exactly as test/eval-retrieval-quality.test.ts pins them', () => {
@@ -270,6 +285,67 @@ describe('CLI', () => {
       json: true, stubEmbed: true, relational: true, limit: 25, embedCache: '/tmp/x.sqlite', out: '/tmp/r.json',
     });
   });
+
+  test('parseArgs: --autocut, --relational-pin and --search-pin overlays are accepted (search-pin is repeatable, last write wins)', () => {
+    expect(parseArgs(['--autocut', 'on']).autocut).toBe('on');
+    expect(parseArgs(['--autocut', 'off']).autocut).toBe('off');
+    expect(parseArgs([]).autocut).toBeUndefined();
+    for (const v of ['0', '7', '10', 'off']) expect(parseArgs(['--relational-pin', v]).relationalPin).toBe(v);
+    expect(parseArgs([]).relationalPin).toBeUndefined();
+    expect(parseArgs([]).searchPins).toBeUndefined();
+    expect(parseArgs(['--search-pin', 'search.autocut=true'])).toMatchObject({ searchPins: { 'search.autocut': 'true' } });
+    expect(parseArgs(['--search-pin', ' search.relational_rerank_pin = 5 ', '--search-pin', 'search.token_budget=off', '--search-pin', 'search.token_budget=4000']).searchPins).toEqual({
+      'search.relational_rerank_pin': '5',
+      'search.token_budget': '4000',
+    });
+    // A value may itself contain '=' — only the first one splits.
+    expect(parseArgs(['--search-pin', 'search.x=a=b']).searchPins).toEqual({ 'search.x': 'a=b' });
+  });
+
+  test('SEARCH_PIN_RESERVED covers the reranker keys and nothing else', () => {
+    for (const k of ['search.reranker.model', 'search.reranker.enabled', 'search.reranker']) expect(SEARCH_PIN_RESERVED.test(k)).toBe(true);
+    for (const k of ['search.autocut', 'search.mode', 'search.relational_rerank_pin', 'search.rerankerx', 'search.reranker_other']) expect(SEARCH_PIN_RESERVED.test(k)).toBe(false);
+  });
+
+  // Rejection goes through usage() → process.exit(2), so it is observed from a
+  // child process (~0.2s each: the script exits before touching the brain).
+  const rejected = (argv: string[]): { status: number | null; stderr: string } => {
+    const r = spawnSync('bun', ['run', 'scripts/r1-namedthing-rerank-ab.ts', ...argv], { cwd: ROOT, encoding: 'utf-8' });
+    return { status: r.status, stderr: r.stderr };
+  };
+
+  test('--autocut rejects anything but on|off (exit 2)', () => {
+    const r = rejected(['--autocut', 'maybe']);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('--autocut takes on|off (got maybe)');
+    expect(rejected(['--autocut']).stderr).toContain('--autocut needs a value');
+  }, 30_000);
+
+  test('--relational-pin rejects values outside 0-10|off (exit 2)', () => {
+    for (const bad of ['11', '-1', 'on', '2.5']) {
+      const r = rejected(['--relational-pin', bad]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain(`--relational-pin takes 0-10 or off (got ${bad})`);
+    }
+  }, 30_000);
+
+  test('--search-pin rejects malformed pins (exit 2): no "=", empty value, non-search.* key, bare "search."', () => {
+    for (const bad of ['search.autocut', 'search.autocut=', 'autocut=true', 'search.=x', '=true']) {
+      const r = rejected(['--search-pin', bad]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain(`--search-pin takes search.<key>=<value> (got ${bad})`);
+    }
+  }, 30_000);
+
+  test('--search-pin refuses the reserved search.reranker.* keys (the arm axis) BEFORE any spend (exit 2)', () => {
+    for (const bad of ['search.reranker.model=voyage:rerank-2', 'search.reranker.enabled=false']) {
+      const r = rejected(['--search-pin', bad, '--stub-embed']);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain(`--search-pin cannot overlay ${bad.split('=')[0]}`);
+      expect(r.stderr).toContain(R1_ON_RERANKER_MODEL);
+      expect(r.stderr).not.toContain('seeded'); // refused at parse time: the brain was never built
+    }
+  }, 30_000);
 
   test('--stub-embed dry run: OFF arm only, ON arm skipped with the VOYAGE_API_KEY note, glossary block present, exit 0', () => {
     const dir = mkdtempSync(join(tmpdir(), 'r1-ab-'));

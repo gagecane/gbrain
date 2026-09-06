@@ -21,8 +21,9 @@
  *     [--all] [--question-ids FILE] [--limit N]
  *     [--out-ndjson FILE] [--out-md FILE] [--json]
  *
- * Pins default to the receipt's `run_config.pins` (by_type_summary line);
- * explicit flags win. Spend: every page/question embed is a cache hit when
+ * Pins default to the receipt's `run_config` (the by_type_summary line — the
+ * harness writes them flat: mode, reranker, autocut, topK, ...); explicit flags
+ * win. Spend: every page/question embed is a cache hit when
  * the receipt's cache is given; the clause sub-query embeds (≤ 2 per miss)
  * and, with --reranker on, one rerank call per miss are the only paid calls.
  *
@@ -185,7 +186,7 @@ async function main(): Promise<void> {
   const splits = args.splits ? (JSON.parse(readFileSync(args.splits, 'utf8')) as Record<string, unknown>) : null;
   const questionIds = args.questionIds ? new Set(loadQuestionIds(args.questionIds)) : null;
 
-  // Pins: explicit flags > receipt run_config.pins > (mode) balanced with a warning.
+  // Pins: explicit flags > receipt run_config (flat, as buildRunConfig writes it) > (mode) balanced with a warning.
   const rp = pinsFromReceipt(receipt);
   const pins: DiagnosticsPins = { ...args.pins };
   if (pins.mode === undefined && isSearchMode(rp.mode)) pins.mode = rp.mode as SearchMode;

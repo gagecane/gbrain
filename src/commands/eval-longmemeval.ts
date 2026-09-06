@@ -766,10 +766,10 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
         `spend est ${qa.est_cost_usd === null ? 'unpriced' : `$${qa.est_cost_usd.toFixed(4)}`}, ` +
         `this run $${(qa.run_cost_usd ?? 0).toFixed(4)}, all rows $${qa.actual_cost_usd.toFixed(4)}\n`,
       );
-      if (opts.judge && (qa.judge_errors > 0 || qa.skipped_budget > 0)) {
+      if (opts.judge && !qa.complete) {
         const line = `[longmemeval] ${opts.allowIncompleteJudgments ? 'WARN' : 'FAIL'} --judge: judgments incomplete ` +
-          `(judge_errors ${qa.judge_errors}, skipped_budget ${qa.skipped_budget}) — NOT publishable; re-run with ` +
-          `--judge --resume-from FILE until both are 0`;
+          `(judge_errors ${qa.judge_errors}, skipped_budget ${qa.skipped_budget}, unjudged ${qa.unjudged}) — NOT publishable; re-run with ` +
+          `--judge --resume-from FILE until all three are 0`;
         process.stderr.write(opts.allowIncompleteJudgments ? `${line} (continuing: --allow-incomplete-judgments)\n` : `${line}.\n`);
         if (!opts.allowIncompleteJudgments) exitCode = 1;
       }
@@ -1055,19 +1055,25 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
   let vectorDegradedRows = 0;
   let expansionFailedRows = 0;
   let expansionReplayMiss = 0;
-  // When --by-type AND --resume-from point at a file, seed the buckets from
-  // existing rows (re-scored) so the final summary is cumulative.
+  // Prior rows that survive into the output: a prior error row for a question
+  // about to be re-run is dropped (its retry row follows it).
+  const rerun = new Set(questions.map(q => q.question_id));
+  const keptPrior = priorRows.filter(r => !(typeof r.error === 'string' && !r.hypothesis && rerun.has(r.question_id as string)));
+  // --resume-from: prior rows feed the degradation gates whether or not
+  // --by-type is set (a partial resume must still fail on rows the prior run
+  // degraded). Bucket seeding (re-scored) only feeds the --by-type summary.
+  if (opts.resumeFromPath) {
+    const deg = countDegradation(keptPrior, degradeOpts);
+    rerankerSkippedRows += deg.rerankerSkipped;
+    vectorDegradedRows += deg.vectorDegraded;
+    expansionFailedRows += deg.expansionFailed;
+  }
   if (opts.byType && opts.resumeFromPath) {
-    const priorRows = readJsonlRows(opts.resumeFromPath);
-    const seed = seedBucketsFromRows(priorRows, buckets, { goldByQid, k: opts.topK, includeAbstention: opts.includeAbstention });
+    const seed = seedBucketsFromRows(keptPrior, buckets, { goldByQid, k: opts.topK, includeAbstention: opts.includeAbstention });
     distinct.push(...seed.distinct);
     excludedAbstention += seed.excludedAbstention;
     goldMissing += seed.goldMissing;
     slugCollisions += seed.collisions;
-    const deg = countDegradation(priorRows, degradeOpts);
-    rerankerSkippedRows += deg.rerankerSkipped;
-    vectorDegradedRows += deg.vectorDegraded;
-    expansionFailedRows += deg.expansionFailed;
   }
   const runStart = Date.now();
   let errorCount = 0;
@@ -1077,6 +1083,8 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
   const qaRows: RowLike[] = [];
 
   const foldRow = (row: LongMemEvalRow): void => {
+    // gold_missing / slug_collisions count EVERY question row (abstention + no-gold rows here,
+    // collision-abort error rows in the catch below) — the set seedBucketsFromRows counts on resume.
     if (row.gold_missing_from_haystack.length > 0) goldMissing++;
     if (row.slug_collision > 0) slugCollisions++;
     if (row.abstention && !opts.includeAbstention) { excludedAbstention++; return; }
@@ -1164,11 +1172,8 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
           onRow: (row) => progress.tick(1, `${String(row.question_id)} (judge)`),
         });
       }
-      const rerun = new Set(questions.map(q => q.question_id));
-      for (const row of priorRows) {
+      for (const row of keptPrior) {
         if (row.kind === 'by_type_summary' || typeof row.question_id !== 'string') continue;
-        const errorRow = typeof row.error === 'string' && (!row.hypothesis || row.hypothesis === '');
-        if (errorRow && rerun.has(row.question_id)) continue;
         qaRows.push(row);
         if (opts.judge) emitter.emit(row);
       }

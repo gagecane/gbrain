@@ -62,8 +62,8 @@ export const JUDGE_METHODOLOGY_NOTE =
   'empty completion, completion that is neither yes nor no) are recorded as judge_error, not scored no; ' +
   'accuracy_headline scores every judge_error, budget-skipped row and reader-error row as INCORRECT over all ' +
   'questions (incl. _abs), so it is never more lenient than the official rule; accuracy_excluding_errors ' +
-  '(errors out of the denominator) is secondary. A run with judge_errors>0 or skipped_budget>0 is not publishable — ' +
-  're-judge with --judge --resume-from until both are 0. (3) ci95_bootstrap is question-sampling uncertainty only. ' +
+  '(errors out of the denominator) is secondary. A run with judge_errors>0, skipped_budget>0 or unjudged>0 is not publishable — ' +
+  're-judge with --judge --resume-from until all three are 0. (3) ci95_bootstrap is question-sampling uncertainty only. ' +
   '(4) Not directly comparable to other systems\' published numbers (reader, context construction, prompts, ' +
   'judge and dataset revision differ); no SOTA claim.';
 

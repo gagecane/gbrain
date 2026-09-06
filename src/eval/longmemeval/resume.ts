@@ -129,9 +129,14 @@ export interface SeedResult {
   skipped: number;
   /** Per-seeded-row distinct_sessions_in_top_k (for mean_distinct_sessions). */
   distinct: number[];
-  /** Rows whose gold names a session absent from their haystack. */
+  /**
+   * Rows whose gold names a session absent from their haystack. Counted over
+   * EVERY question row (abstention, no-gold and error rows included) — the
+   * same set the live harness counts — so `run_config.gold_missing_from_haystack`
+   * is identical for a fresh run and a resume of the same file.
+   */
   goldMissing: number;
-  /** Rows with at least one slug collision. */
+  /** Rows with at least one slug collision (same row set as `goldMissing`; a collision-abort error row counts). */
   collisions: number;
 }
 
@@ -147,6 +152,9 @@ export function seedBucketsFromRows(
 ): SeedResult {
   const res: SeedResult = { seeded: 0, excludedAbstention: 0, skipped: 0, distinct: [], goldMissing: 0, collisions: 0 };
   for (const row of rows) {
+    if (row.kind === 'by_type_summary' || typeof row.question_id !== 'string') { res.skipped++; continue; }
+    if (Array.isArray(row.gold_missing_from_haystack) && row.gold_missing_from_haystack.length > 0) res.goldMissing++;
+    if (typeof row.slug_collision === 'number' && row.slug_collision > 0) res.collisions++;
     if (!isScoredQuestionRow(row) || typeof row.question_type !== 'string') { res.skipped++; continue; }
     const qid = row.question_id as string;
     const gold = ctx.goldByQid.get(qid);
@@ -159,8 +167,6 @@ export function seedBucketsFromRows(
     addRowToBucket(bucket, { recall_all_hit: score.recall_all_hit, recall_any_hit: score.recall_any_hit });
     res.seeded++;
     res.distinct.push(score.distinct_sessions_in_top_k);
-    if (Array.isArray(row.gold_missing_from_haystack) && row.gold_missing_from_haystack.length > 0) res.goldMissing++;
-    if (typeof row.slug_collision === 'number' && row.slug_collision > 0) res.collisions++;
   }
   return res;
 }

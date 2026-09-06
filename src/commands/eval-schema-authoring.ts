@@ -141,8 +141,10 @@ the scaffold for a passing eval. The aggregator (aggregateVerdict) is
 real and unit-tested; the fixture-brain harness that feeds it is not
 wired yet.
 
-Usage:
-  gbrain eval schema-authoring [--fixture <dir>] [--source <id>] [--json]
+Usage (NOT yet dispatched from the CLI: 'gbrain eval schema-authoring' is not
+a registered subcommand; the entry is runEvalSchemaAuthoringCli(args) and the
+dispatch branch lands with the fixture-brain harness):
+  schema-authoring [--fixture <dir>] [--source <id>] [--json]
 
 Options:
   --fixture <dir>   Fixture brain directory (recorded, unused yet)

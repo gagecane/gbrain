@@ -142,9 +142,9 @@ export interface ModeBundle {
    */
   searchLimit: number;
   /**
-   * v0.35.0.0+ — cross-encoder reranker. Off for conservative/balanced,
-   * on for tokenmax. ZeroEntropy zerank-2 by default; can be overridden
-   * via `search.reranker.model`. Slots between dedup and token-budget
+   * v0.35.0.0+ — cross-encoder reranker. Off for conservative, on for
+   * balanced/tokenmax. Model: `DEFAULT_RERANKER_MODEL` (voyage:rerank-2.5),
+   * overridable via `search.reranker.model`. Slots between dedup and token-budget
    * enforcement in hybrid.ts; fail-open on any RerankError (audit-logged).
    * Cost anchor: ~$0.0003/query at tokenmax topNIn=30 × ~400 tokens/chunk
    * (rounding error vs Opus, meaningful vs Haiku).
@@ -477,7 +477,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     autocut_min_keep: 1,
     // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
     keyword_arm_confidence_floor: null,
-    // Phase E3 — metadata boost gate: `always` (today's pipeline) until the Cat 13 held-out receipt.
+    // Phase E3 — metadata boost gate `lexical` (flipped on the Cat 13 held-out receipt); `always` restores the pre-wave pipeline.
     metadata_boost_gate: 'lexical',
   }),
   balanced: Object.freeze({
@@ -548,7 +548,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     autocut_min_keep: 1,
     // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
     keyword_arm_confidence_floor: null,
-    // Phase E3 — metadata boost gate: `always` (today's pipeline) until the Cat 13 held-out receipt.
+    // Phase E3 — metadata boost gate `lexical` (flipped on the Cat 13 held-out receipt); `always` restores the pre-wave pipeline.
     metadata_boost_gate: 'lexical',
   }),
   tokenmax: Object.freeze({
@@ -610,7 +610,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     autocut_min_keep: 1,
     // Ranker wave (Phase E2) — keyword-arm confidence floor OFF (null) until the Cat 13 receipt.
     keyword_arm_confidence_floor: null,
-    // Phase E3 — metadata boost gate: `always` (today's pipeline) until the Cat 13 held-out receipt.
+    // Phase E3 — metadata boost gate `lexical` (flipped on the Cat 13 held-out receipt); `always` restores the pre-wave pipeline.
     metadata_boost_gate: 'lexical',
   }),
 });
@@ -1394,7 +1394,7 @@ export function knobsHash(
     // v=29 addition (ranker wave Phase E3, append-only): metadata boost gate.
     // `lexical` skips the metadata boosts on vector-only-voter queries and
     // re-orders the fused page, so a `lexical` write must never serve an
-    // `always` lookup. A partial-knobs literal hashes as the bundle default.
+    // `always` lookup. A partial-knobs literal hashes as `always` — the deliberate pre-wave hash identity, NOT the bundle default (`lexical`).
     `mbg=${knobs.metadata_boost_gate ?? DEFAULT_METADATA_BOOST_GATE}`,
   ];
   const h = createHash('sha256');

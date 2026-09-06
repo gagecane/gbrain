@@ -45,6 +45,7 @@ import {
   type MissDiagnosticsRow,
 } from '../src/eval/longmemeval/diagnostics.ts';
 import { buildSlugToRawMap } from '../src/eval/longmemeval/metrics.ts';
+import { buildRunConfig, type RetrievalPins } from '../src/eval/longmemeval/run-config.ts';
 import type { LongMemEvalQuestion } from '../src/eval/longmemeval/adapter.ts';
 import { createBenchmarkBrain } from '../src/eval/longmemeval/harness.ts';
 import { __setEmbedTransportForTests, configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
@@ -176,15 +177,38 @@ describe('receipt parsing, top-k reading, split membership, summary, glossary', 
     ], retrieved_session_ids: ['s_A', 's_C', 's_B'] }),
     'not json',
     JSON.stringify({ question_id: 'q2', recall_all_hit: true, retrieved_session_ids: ['x', 'y'] }),
-    JSON.stringify({ kind: 'by_type_summary', k: 5, run_config: { pins: { mode: 'balanced', reranker: { enabled: true, model: 'voyage:rerank-2.5' }, autocut: true, expansion_variant_budget: null, top_k: 5 } } }),
+    // The harness writes pins FLAT on run_config with `topK` (run-config.ts:buildRunConfig).
+    JSON.stringify({ kind: 'by_type_summary', k: 5, run_config: { mode: 'balanced', keyword_only: false, reranker: { enabled: true, model: 'voyage:rerank-2.5' }, autocut: true, expansion: false, expansion_variant_budget: null, embedder: 'voyage-3@1024', topK: 5, knobs_hash: 'abc' } }),
   ].join('\n');
 
-  test('parseReceipt separates rows from the summary and skips corrupt lines; pins come from run_config.pins', () => {
+  test('parseReceipt separates rows from the summary and skips corrupt lines; pins come from the flat run_config (topK → top_k)', () => {
     const parsed = parseReceipt(RECEIPT);
     expect(parsed.rows.map(r => r.question_id)).toEqual(['q1', 'q2']);
     expect(parsed.summary?.k).toBe(5);
-    expect(pinsFromReceipt(parsed)).toEqual({ mode: 'balanced', reranker: { enabled: true, model: 'voyage:rerank-2.5' }, autocut: true, expansion_variant_budget: null, top_k: 5 });
+    expect(pinsFromReceipt(parsed)).toEqual({ mode: 'balanced', reranker: { enabled: true, model: 'voyage:rerank-2.5' }, autocut: true, expansion: false, expansion_variant_budget: null, top_k: 5, embedder: 'voyage-3@1024' });
     expect(pinsFromReceipt(parseReceipt('{"question_id":"z"}'))).toEqual({});
+    expect(pinsFromReceipt(parseReceipt('{"kind":"by_type_summary","k":5,"run_config":{"knobs_hash":"abc"}}'))).toEqual({});
+  });
+  test('pinsFromReceipt round-trips the real buildRunConfig output: a reranker-off receipt reads back reranker off', () => {
+    const pins: RetrievalPins = {
+      mode: 'tokenmax', keyword_only: false, reranker: { enabled: false, model: 'voyage:rerank-2.5' }, autocut: false,
+      expansion: true, expansion_variant_budget: 3, embedder: 'voyage-3@1024', top_k: 10, trajectory: false,
+    };
+    const run_config = buildRunConfig({
+      pins, retrieval_config_hash: 'h', dataset_sha256: 'd', dataset_questions: 1, knobs_hash: 'k', knobs_hash_version: 1, cache: null,
+      cache_skipped: 'disabled', reranker_skipped_rows: 0, vector_degraded_rows: 0, expansion_failed_rows: 0, expansion_replay_miss: 0,
+      expansion_replay: null, gold_missing_from_haystack: 0, slug_collisions: 0, excluded_abstention: 0, question_ids_file: null, errors: 0,
+    });
+    expect(run_config).not.toHaveProperty('pins');
+    const parsed = parseReceipt(JSON.stringify({ kind: 'by_type_summary', k: 10, run_config }));
+    expect(pinsFromReceipt(parsed)).toEqual({
+      mode: 'tokenmax', reranker: { enabled: false, model: 'voyage:rerank-2.5' }, autocut: false, expansion: true,
+      expansion_variant_budget: 3, top_k: 10, embedder: 'voyage-3@1024',
+    });
+  });
+  test('pinsFromReceipt still accepts a legacy nested run_config.pins block', () => {
+    const parsed = parseReceipt(JSON.stringify({ kind: 'by_type_summary', k: 5, run_config: { pins: { mode: 'conservative', reranker: { enabled: false, model: 'x' }, autocut: true, expansion_variant_budget: null, top_k: 5 } } }));
+    expect(pinsFromReceipt(parsed)).toEqual({ mode: 'conservative', reranker: { enabled: false, model: 'x' }, autocut: true, expansion_variant_budget: null, top_k: 5 });
   });
   test('receiptTopKSessions reads the distinct sessions among the top-k CHUNK rows (falls back to retrieved_session_ids)', () => {
     const parsed = parseReceipt(RECEIPT);
@@ -308,7 +332,7 @@ describe('e2e — mixed-case fixture, stub embed transport, synthetic receipt', 
       JSON.stringify({ question_id: 'mc-2', question_type: 'multi-session', recall_all_hit: false, recall_any_hit: true,
         retrieved: [{ slug: 'chat/sess-multi-a', chunk_id: 1, session_id: 'Sess_MULTI_a', rank: 1, score: 1 }], retrieved_session_ids: ['Sess_MULTI_a'] }),
       JSON.stringify({ question_id: 'mc-3_abs', question_type: 'single-session-assistant', recall_all_hit: false, abstention: true, retrieved: [], retrieved_session_ids: [] }),
-      JSON.stringify({ kind: 'by_type_summary', k: 2, run_config: { pins: { mode: 'balanced', reranker: { enabled: false, model: 'x' }, autocut: false, expansion_variant_budget: null, top_k: 2 } } }),
+      JSON.stringify({ kind: 'by_type_summary', k: 2, run_config: { mode: 'balanced', reranker: { enabled: false, model: 'x' }, autocut: false, expansion_variant_budget: null, topK: 2 } }),
     ].join('\n'));
     const cachePath = join(tmp, 'embed-cache.sqlite');
     const splits = { dev40: ['mc-9'], decision430: ['mc-2'], halfA430: ['mc-2'], halfB430: ['mc-1'] };

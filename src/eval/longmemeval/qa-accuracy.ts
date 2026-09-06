@@ -77,7 +77,15 @@ export type QaAccuracyBlock = {
   complete: boolean;
   judge_model: string;
   judge_prompt_version: string;
+  /**
+   * The ONE `judge_config_hash` stamped on the judged rows when they agree;
+   * this run's hash when no row carries one (or the rows disagree — see
+   * `mixed_judge_config`). Derived from the ROWS, never from the launch flags
+   * alone, so a backfill launched without the original `--model` cannot
+   * relabel a homogeneous file.
+   */
   judge_config_hash: string;
+  /** More than one distinct `judge_config_hash` across the judged rows. */
   mixed_judge_config: boolean;
   est_cost_usd: number | null;
   /** Summed over every row's `judge_cost_usd` (the receipt's cumulative judge spend across resumes). */
@@ -90,6 +98,7 @@ export type QaAccuracyBlock = {
 export interface QaAccuracyOpts {
   judgeModel: string;
   judgePromptVersion: string;
+  /** This run's hash — published only when no row carries a hash or the rows disagree. */
   judgeConfigHash: string;
   estCostUsd: number | null;
   /** Summed over the rows' own `judge_cost_usd` when omitted. */
@@ -134,7 +143,7 @@ export function buildQaAccuracy(rows: ReadonlyArray<QaRowLike>, opts: QaAccuracy
   let nonAbsTotal = 0;
   let nonAbsCorrect = 0;
   let actual = 0;
-  let mixedConfig = false;
+  const hashes = new Set<string>();
 
   for (const row of deduped) {
     const type = typeof row.question_type === 'string' ? row.question_type : 'unknown';
@@ -146,7 +155,7 @@ export function buildQaAccuracy(rows: ReadonlyArray<QaRowLike>, opts: QaAccuracy
     const judgeError = typeof row.judge_error === 'string';
     const skipped = row.judge_skipped === 'budget';
     if (typeof row.judge_cost_usd === 'number' && Number.isFinite(row.judge_cost_usd)) actual += row.judge_cost_usd;
-    if (typeof row.judge_config_hash === 'string' && row.judge_config_hash !== opts.judgeConfigHash) mixedConfig = true;
+    if (typeof row.judge_config_hash === 'string') hashes.add(row.judge_config_hash);
 
     for (const s of [t, agg]) {
       s.total++;
@@ -172,6 +181,7 @@ export function buildQaAccuracy(rows: ReadonlyArray<QaRowLike>, opts: QaAccuracy
   for (const k of Object.keys(byType).sort()) sortedTypes[k] = finalizeType(byType[k]);
   finalizeType(agg);
   const headlineAcc = agg.accuracy_headline;
+  const [onlyHash] = hashes;
   return {
     total_questions: agg.total,
     judged: agg.judged,
@@ -192,8 +202,8 @@ export function buildQaAccuracy(rows: ReadonlyArray<QaRowLike>, opts: QaAccuracy
     complete: agg.judge_errors === 0 && agg.skipped_budget === 0 && agg.unjudged === 0,
     judge_model: opts.judgeModel,
     judge_prompt_version: opts.judgePromptVersion,
-    judge_config_hash: opts.judgeConfigHash,
-    mixed_judge_config: mixedConfig,
+    judge_config_hash: hashes.size === 1 ? onlyHash : opts.judgeConfigHash,
+    mixed_judge_config: hashes.size > 1,
     est_cost_usd: opts.estCostUsd,
     actual_cost_usd: opts.actualCostUsd ?? actual,
     run_cost_usd: opts.runCostUsd ?? null,

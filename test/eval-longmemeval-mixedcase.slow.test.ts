@@ -259,8 +259,20 @@ describe('slug collision touching gold → error row (plan D32)', () => {
     expect(r['mc-1'].recall_all_hit).toBe(true);
     expect(summary.aggregate.total).toBe(1);
     expect(summary.slug_collisions).toBe(1);
+    expect(summary.run_config.slug_collisions).toBe(1);
     expect(summary.run_config.errors).toBe(1);
-  }, 60_000);
+
+    // A resume of the same file re-derives the SAME integrity counters: the
+    // prior collision-abort error row is dropped (col-1 re-runs and aborts
+    // again → counted once by the live path), mc-1 is re-scored from the file.
+    await runEvalLongMemEval([fixture, ...BASE, '--output', out, '--resume-from', out], { engine });
+    const resumed = splitRows(out);
+    expect(resumed.rows.map(r => r.question_id)).toEqual(['col-1', 'mc-1', 'col-1']); // appended: prior error row + retry row
+    expect(resumed.summary.run_config.slug_collisions).toBe(summary.run_config.slug_collisions);
+    expect(resumed.summary.run_config.gold_missing_from_haystack).toBe(summary.run_config.gold_missing_from_haystack);
+    expect(resumed.summary.slug_collisions).toBe(1);
+    expect(resumed.summary.aggregate.total).toBe(1);
+  }, 120_000);
 });
 
 describe('--question-ids (dev slice)', () => {
@@ -468,6 +480,32 @@ describe('silent vector-arm / expansion degradation is a gate (mirrors --reranke
     const { rows, summary } = splitRows(out);
     expect(rows[0].search_meta.vector_enabled).toBe(true);
     expect(summary.run_config.vector_degraded_rows).toBe(0);
+  }, 120_000);
+
+  test('a PARTIAL resume without --by-type still folds prior-row degradation into the gate (exit 1; live row healthy)', async () => {
+    gateway1536();
+    installFakeEmbedTransport();
+    const out = join(tmp, 'partial-resume-degraded.jsonl');
+    const recordDir = join(tmp, 'partial-resume-ledger');
+    // Two prior rows scored keyword-only after a silent embed failure; the third question is left for this run.
+    writeFileSync(out, readRows(FIXTURE).filter(q => q.question_id !== 'mc-3_abs').map(q => JSON.stringify({
+      question_id: q.question_id, question: q.question, question_type: q.question_type, hypothesis: 'done',
+      retrieved_session_ids: q.answer_session_ids ?? [],
+      search_meta: { vector_enabled: false, expansion_applied: false, degraded: [{ stage: 'embed_unavailable', reason: 'provider_error' }], reranked: false },
+    })).join('\n') + '\n', 'utf8');
+    const code = await runCapturingExit(
+      [...VECTOR_COMMON.filter(a => a !== '--by-type'), '--record', '--output', out, '--resume-from', out],
+      { engine, recordDir },
+    );
+    expect(code).toBe(1);
+    const rows = readRows(out);
+    expect(rows.map(r => r.question_id)).toEqual(['mc-1', 'mc-2', 'mc-3_abs']); // appended; no summary line without --by-type
+    expect(rows[2].search_meta.vector_enabled).toBe(true); // the live row is healthy — the gate fired on the PRIOR rows
+    const ledger = readRows(join(recordDir, 'eval-results.jsonl'));
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].status).toBe('failed');
+    expect(ledger[0].params.questions_run).toBe(1);
+    expect(ledger[0].params.vector_degraded_rows).toBe(2);
   }, 120_000);
 
   test('--expansion whose expandFn throws → expansion_failed_rows > 0 and exit 1 (vector arm itself healthy)', async () => {

@@ -158,6 +158,37 @@ describe('replayRow', () => {
     expect(r.recall_all_hit).toBe(true);
   });
 
+  test('relational_pinned rows survive the cut AND sit outside the cliff math, matching hybrid.ts', () => {
+    // Scored cliff: 0.9, 0.88 | 0.5, 0.48 (gap 0.42 after rank 2). A pinned row
+    // scored 0.05 sits last: if its score entered the cliff math the largest
+    // gap would move to AFTER 0.48 (0.53 -> 0.06 = 0.48) and, with the pin
+    // preserved anyway, nothing would be cut. Live hybrid.ts excludes it, so
+    // the cliff stays after rank 2 and the pin rides through the cut.
+    const p = pool([0.9, 0.88, 0.5, 0.48, 0.05], undefined, [{}, {}, {}, {}, { relational_pinned: true }]);
+    const row: ReplayRow = { question_id: 'q', rerank_pool: p, answer_session_ids: ['S0', 'S4'] };
+    const r = replayRow(row, 0.35, 5);
+    expect(r.decision.applied).toBe(true);
+    expect(r.decision.total).toBe(5);
+    expect(r.decision.kept).toBe(3);
+    expect(r.kept.map((x) => x.session_id)).toEqual(['S0', 'S1', 'S4']);
+    expect(r.recall_all_hit).toBe(true);
+    // Control: the SAME pool with the pin flag dropped lets 0.05 enter the
+    // cliff math — the largest gap moves to the tail, so 4 rows are kept and
+    // the 0.05 row (no longer preserved) is the one cut.
+    const unpinned = { ...row, rerank_pool: pool([0.9, 0.88, 0.5, 0.48, 0.05]) };
+    const c = replayRow(unpinned, 0.35, 5);
+    expect(c.decision.kept).toBe(4);
+    expect(c.kept.map((x) => x.session_id)).toEqual(['S0', 'S1', 'S2', 'S3']);
+    // A pinned row that is also unscored (no rerank_score) still survives.
+    const unscoredPin = pool([0.9, 0.88, 0.5, 0.48, 0], undefined, [{}, {}, {}, {}, { relational_pinned: true, rerank_score: null }]);
+    expect(replayRow({ ...row, rerank_pool: unscoredPin }, 0.35, 5).kept.map((x) => x.session_id)).toEqual(['S0', 'S1', 'S4']);
+    // The weak-top histogram reads the same scoreOf view: a pin can never be the top.
+    const pinOnlyTop = pool([0.3, 0.95], undefined, [{}, { relational_pinned: true }]);
+    const hist = topScoreHistogram([{ question_id: 'h', rerank_pool: pinOnlyTop, answer_session_ids: [] }]);
+    expect(hist.find((b) => b.bin_start === 0.3)?.count).toBe(1);
+    expect(hist.find((b) => b.bin_start === 0.9)?.count).toBe(0);
+  });
+
   test('distinct sessions count each session once; empty gold is never a recall_all hit', () => {
     const p = pool([0.9, 0.89, 0.88, 0.87, 0.86, 0.85], ['A', 'A', 'B', 'B', 'C', 'D']);
     const row: ReplayRow = { question_id: 'q', rerank_pool: p, answer_session_ids: ['A', 'B', 'C'] };
@@ -365,8 +396,15 @@ describe('parseReplayNdjson', () => {
     expect(() => parseReplayNdjson(JSON.stringify(bad))).toThrow(/row q1 \(line 1\) rerank_pool\[1\]/);
     // A non-finite score is carried as unscored (null), not as a number.
     expect(normalizePoolRow({ slug: 'a', session_id: 's', rerank_score: 'NaN' }, 'w').rerank_score).toBeNull();
-    // exact_lookup is carried only when literally true (the capture's own shape).
+    // exact_lookup / relational_pinned are carried only when literally true (the capture's own shape).
     expect(normalizePoolRow({ slug: 'a', session_id: 's', exact_lookup: false }, 'w').exact_lookup).toBeUndefined();
+    expect(normalizePoolRow({ slug: 'a', session_id: 's', relational_pinned: false }, 'w').relational_pinned).toBeUndefined();
+    expect(normalizePoolRow({ slug: 'a', session_id: 's', relational_pinned: true, rerank_score: 0.05 }, 'w')).toEqual({
+      slug: 'a',
+      session_id: 's',
+      rerank_score: 0.05,
+      relational_pinned: true,
+    });
   });
 });
 
@@ -422,9 +460,10 @@ describe('scripts/replay-autocut-floor.ts (CLI)', () => {
       expect(r4.stderr).toContain('--validate-live takes exactly one floor (got 2');
       expect(r4.stdout).toBe(''); // nothing was replayed
 
-      // Harness capture rows carry gold COUNTS (gold_total / gold_found), not
-      // the ids. Without --dataset such a capture must be refused — scoring
-      // against an empty gold set printed 0% recall at every floor once.
+      // Current harness rows carry answer_session_ids; captures produced
+      // before that carried only gold COUNTS (gold_total / gold_found). Without
+      // --dataset such an older capture must be refused — scoring against an
+      // empty gold set printed 0% recall at every floor once.
       const noGold = rows.map(({ answer_session_ids: _drop, ...rest }) => ({ ...rest, gold_total: _drop.length }));
       const noGoldFile = join(dir, 'nogold.ndjson');
       writeFileSync(noGoldFile, noGold.map((r) => JSON.stringify(r)).join('\n') + '\n');

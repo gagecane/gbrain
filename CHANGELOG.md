@@ -55,7 +55,18 @@ gbrain config set search.metadata_boost_gate always   # pre-wave boosts
   restores the old semantics. The `--by-type` summary line is `schema_version: 2`
   (`all_hit`/`all_rate`/`any_hit`/`any_rate` per type); `recall_hit` on each
   row is a deprecated alias of `recall_any_hit`.
-- **If you run `tokenmax`:** <!-- TBD Phase A: outcome of the expansion budget flip (A3′/A3′R rule) -->
+- **If you run `tokenmax`, expect worse small-k recall than `balanced`, still.**
+  The new budget-normalized fusion is a real lever — replaying the same
+  recorded Haiku variants, strict `recall_all@5` climbs from 255/470 at the
+  legacy weighting to 394/470 at the smallest pre-registered budget — but
+  even that trails plain hybrid (439/470) by 43 questions on the 430-question
+  decision set, so the bundles keep the legacy weighting and the knob ships
+  for operators: `gbrain config set search.expansion_variant_budget 0.25`
+  recovers most of the loss if you keep expansion on;
+  `gbrain config set search.mode balanced` keeps the reranker and drops
+  expansion. The receipts point at conditional expansion (expand only when
+  the original query's evidence is weak) as the next pre-registered
+  mechanism; it is filed in TODOS.md.
 - **Autocut is off by default in `balanced` and `tokenmax`.** The
   score-discontinuity cut that ran after the reranker halved the returned
   window on average, and the pre-registered replay showed where the saving
@@ -82,7 +93,8 @@ gbrain config set search.metadata_boost_gate always   # pre-wave boosts
   vs off: the 11 entity-core questions lose nothing either way; the 39
   graph-relationship questions collapsed with the reranker on (hit@1 21 → 3,
   hit@3 27 → 5) and recover fully with `search.relational_rerank_pin=3`
-  (0 hit@1 / 0 hit@3 losses, measured with autocut on in the shipped shape).
+  (0 hit@1 / 0 hit@3 losses, measured with `--autocut on`, the shape that
+  shipped before rule R2 turned autocut off).
   Balanced reranker stays on. LongMemEval has no relational intent, so its
   rows are unchanged by the pin.
 - **Metadata boost gate (Cat 13 conceptual recall, gbrain-evals).** Held-out
@@ -137,7 +149,9 @@ gbrain config set search.metadata_boost_gate always   # pre-wave boosts
   shared by the non-empty variant lists so expansion influence no longer
   scales with the variant count. Every vector recall list is a role-tagged
   arm (`original` | `variant` | `clause` | `image`) composed at ONE point.
-  <!-- TBD Phase A: bundle default (null = legacy, or the receipted budget) -->
+  Every bundle keeps `null` (legacy: one full vote per variant, byte-identical
+  to before) because the pre-registered rule failed at every budget; see
+  Measured.
 - **`search.keyword_arm_confidence_floor`** (off in every bundle;
   `src/core/search/arm-confidence.ts`): down-weights the keyword and title
   arms when the keyword arm's top-vs-second margin is below the floor.
@@ -160,8 +174,8 @@ gbrain config set search.metadata_boost_gate always   # pre-wave boosts
   `evaluate_qa.py` prompts per question type at temperature 0 with gpt-4o,
   `judge_error` distinct from incorrect, budget soft-stop, judge-only backfill
   on `--resume-from`, headline scores every ungradable row as incorrect. The
-  reader prompt carries the official abstention instruction. `ChatOpts.temperature`
-  reaches the gateway transport.
+  reader prompt adds an abstention instruction (a disclosed deviation from the
+  official reading prompt). `ChatOpts.temperature` reaches the gateway transport.
 - **Metric glossary:** `recall_all@k`, `recall_any@k`, `qa_accuracy`.
 - **Scripts:** `scripts/eval-spend-guard.sh` (fail-closed paid-run ledger with
   a cap), `scripts/replay-autocut-floor.ts` (floor sweep from a captured pool,
@@ -176,7 +190,8 @@ gbrain config set search.metadata_boost_gate always   # pre-wave boosts
   union across eval subcommands.
 - **Bundle defaults:** `relational_rerank_pin` 3 and `metadata_boost_gate`
   `lexical` in `conservative`, `balanced` and `tokenmax`; `autocut` off in
-  `balanced` and `tokenmax` (`DEFAULT_AUTOCUT` unchanged). <!-- TBD Phase A: expansion budget -->
+  `balanced` and `tokenmax` (`DEFAULT_AUTOCUT` unchanged); `expansion_variant_budget`
+  stays `null` (legacy weighting) in all three.
 - **`--by-type-floor`** gates on `recall_all` by default (see Things to watch).
 - `docs/eval-bench.md`, `docs/architecture/RETRIEVAL.md`, `docs/guides/search-modes.md`
   and `docs/eval/SEARCH_MODE_METHODOLOGY.md` describe the harness as the

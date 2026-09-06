@@ -90,7 +90,7 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       relational_rerank_pin: 3,
       // ranker wave (Phase E2) — keyword-arm confidence floor OFF in every bundle until the Cat 13 receipt.
       keyword_arm_confidence_floor: null,
-      // ranker wave (Phase E3) — metadata boost gate `always` (today's pipeline) in every bundle until the Cat 13 held-out receipt.
+      // ranker wave (Phase E3) — metadata boost gate `lexical` in every bundle since the Cat 13 held-out receipt (`always` = pre-wave pipeline).
       metadata_boost_gate: 'lexical',
     });
   });
@@ -133,7 +133,7 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       relational_rerank_pin: 3,
       // ranker wave (Phase E2) — keyword-arm confidence floor OFF in every bundle until the Cat 13 receipt.
       keyword_arm_confidence_floor: null,
-      // ranker wave (Phase E3) — metadata boost gate `always` (today's pipeline) in every bundle until the Cat 13 held-out receipt.
+      // ranker wave (Phase E3) — metadata boost gate `lexical` in every bundle since the Cat 13 held-out receipt (`always` = pre-wave pipeline).
       metadata_boost_gate: 'lexical',
     });
   });
@@ -174,7 +174,7 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       relational_rerank_pin: 3,
       // ranker wave (Phase E2) — keyword-arm confidence floor OFF in every bundle until the Cat 13 receipt.
       keyword_arm_confidence_floor: null,
-      // ranker wave (Phase E3) — metadata boost gate `always` (today's pipeline) in every bundle until the Cat 13 held-out receipt.
+      // ranker wave (Phase E3) — metadata boost gate `lexical` in every bundle since the Cat 13 held-out receipt (`always` = pre-wave pipeline).
       metadata_boost_gate: 'lexical',
     });
   });

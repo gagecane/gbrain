@@ -54,7 +54,7 @@ export type MetadataBoostGate = 'always' | 'lexical';
 
 export const METADATA_BOOST_GATES: ReadonlyArray<MetadataBoostGate> = Object.freeze(['always', 'lexical']);
 
-/** Every bundle lands here; the Phase E3 receipt decides any flip. */
+/** Hash/fallback identity only — every bundle is `lexical` since the Phase E3 receipt; stays `always` so a knobs literal without the field keeps its pre-wave knobsHash. */
 export const DEFAULT_METADATA_BOOST_GATE: MetadataBoostGate = 'always';
 
 /** Why the decision came out the way it did (stamped on meta for --explain). */

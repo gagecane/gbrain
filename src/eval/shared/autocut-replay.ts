@@ -24,9 +24,11 @@ import { applyAutocut, DEFAULT_AUTOCUT, type AutocutDecision } from '../../core/
  * One captured row of the EXACT pre-autocut `returnPool` (harness
  * `--capture-pool`): scored rows carry a finite `rerank_score`; alias-hop /
  * exact-lookup injections arrive post-rerank and are UNSCORED
- * (`rerank_score` absent or null) but flagged `alias_hit` / `exact_lookup`.
- * Both kinds are carried — dropping the unscored rows would change what
- * `applyAutocut` sees (and `decision.total`) versus the live call.
+ * (`rerank_score` absent or null) but flagged `alias_hit` / `exact_lookup`;
+ * relational pins are flagged `relational_pinned` (scored low by construction,
+ * so hybrid.ts keeps them OUT of the cliff math and preserves them). All kinds
+ * are carried — dropping a row would change what `applyAutocut` sees (and
+ * `decision.total`) versus the live call.
  */
 export interface PoolRow {
   slug: string;
@@ -36,6 +38,7 @@ export interface PoolRow {
   rerank_score?: number | null;
   alias_hit?: boolean;
   exact_lookup?: boolean;
+  relational_pinned?: boolean;
   est_tokens?: number;
 }
 
@@ -78,14 +81,25 @@ export function poolKey(r: PoolRow): string {
 }
 
 /**
- * Same predicate hybrid.ts passes to applyAutocut (alias hop / exact lookup
- * survive the cut). Live it reads `x.alias_hit === true || x.exact_lookup !==
- * undefined`; the capture writes `exact_lookup: true` exactly when the live
- * row had `exact_lookup !== undefined`, so on the captured shape this is the
- * identical predicate.
+ * Same score accessor hybrid.ts passes to applyAutocut: a relational-pinned
+ * row is UNSCORED for the cliff math (live: `x.relational_pinned ? undefined :
+ * x.rerank_score`) — its low-by-construction score must not manufacture or
+ * mask a cliff. Every other row scores by `rerank_score` (null = unscored).
+ */
+export function scoreOf(r: PoolRow): number | null | undefined {
+  return r.relational_pinned === true ? undefined : r.rerank_score;
+}
+
+/**
+ * Same preserve predicate hybrid.ts passes to applyAutocut (alias hop / exact
+ * lookup / relational pin survive the cut). Live it reads `x.alias_hit === true
+ * || x.exact_lookup !== undefined || x.relational_pinned === true`; the capture
+ * writes `exact_lookup: true` exactly when the live row had `exact_lookup !==
+ * undefined` (and `relational_pinned: true` iff live), so on the captured shape
+ * this is the identical predicate.
  */
 export function preservePredicate(r: PoolRow): boolean {
-  return r.alias_hit === true || r.exact_lookup === true;
+  return r.alias_hit === true || r.exact_lookup === true || r.relational_pinned === true;
 }
 
 /**
@@ -106,6 +120,7 @@ export function normalizePoolRow(raw: unknown, where: string): PoolRow {
   row.rerank_score = typeof o.rerank_score === 'number' && Number.isFinite(o.rerank_score) ? o.rerank_score : null;
   if (o.alias_hit === true) row.alias_hit = true;
   if (o.exact_lookup === true) row.exact_lookup = true;
+  if (o.relational_pinned === true) row.relational_pinned = true;
   if (typeof o.est_tokens === 'number' && Number.isFinite(o.est_tokens)) row.est_tokens = o.est_tokens;
   return row;
 }
@@ -156,12 +171,7 @@ export function replayRow(row: ReplayRow, floor: Floor, k: number, knobs: Replay
     kept = pool;
     decision = { applied: false, signal: 'none', cut: pool.length, kept: pool.length, total: pool.length, gapRatio: 0 };
   } else {
-    const r = applyAutocut(
-      pool,
-      (x) => x.rerank_score ?? undefined,
-      { enabled: true, jumpRatio: knobs.jumpRatio, minKeep: knobs.minKeep, minTopScore: floor },
-      preservePredicate,
-    );
+    const r = applyAutocut(pool, scoreOf, { enabled: true, jumpRatio: knobs.jumpRatio, minKeep: knobs.minKeep, minTopScore: floor }, preservePredicate);
     kept = r.kept;
     decision = r.decision;
   }
@@ -374,13 +384,16 @@ export function splitHalf<T extends { question_id: string }>(rows: T[], seed: st
   return { a: sorted.slice(0, mid), b: sorted.slice(mid) };
 }
 
-/** Histogram of each row's TOP rerank score (the weak-top floor's input). */
+/**
+ * Histogram of each row's TOP rerank score (the weak-top floor's input) — over
+ * the same `scoreOf` view autocut sees, so pinned rows never supply the top.
+ */
 export function topScoreHistogram(rows: ReplayRow[], binWidth = 0.1): Array<{ bin_start: number; bin_end: number; count: number }> {
   const bins = Math.max(1, Math.round(1 / binWidth));
   const counts = new Array<number>(bins).fill(0);
   let above = 0;
   for (const row of rows) {
-    const scores = row.rerank_pool.map((r) => r.rerank_score).filter((s): s is number => typeof s === 'number' && Number.isFinite(s));
+    const scores = row.rerank_pool.map(scoreOf).filter((s): s is number => typeof s === 'number' && Number.isFinite(s));
     if (scores.length === 0) continue;
     const top = Math.max(...scores);
     if (top >= 1) {
@@ -443,7 +456,7 @@ export interface ParsedNdjson {
  * row WITHOUT `rerank_pool` aborts, naming the row (plan error registry:
  * "autocut replay missing pool"). Summary/meta rows are skipped. Every pool
  * row is normalized through `normalizePoolRow` — unscored alias / exact-lookup
- * rows are carried, malformed rows abort naming row + index.
+ * rows and relational pins are carried, malformed rows abort naming row + index.
  */
 export function parseReplayNdjson(text: string): ParsedNdjson {
   const rows: ReplayRow[] = [];

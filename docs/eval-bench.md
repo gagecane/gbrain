@@ -641,7 +641,7 @@ gold was lost before choosing a fix:
 `bun run scripts/lme-miss-diagnostics.ts <receipt.ndjson> --dataset FILE
 [--splits evals/longmemeval/splits-seed42.json]` re-creates each missed
 question's brain exactly as the harness built it (same pins — defaulting to
-the receipt's `run_config.pins` — every embed a cache hit) and locates every
+the receipt's flat `run_config` on the summary line — every embed a cache hit) and locates every
 missing gold session per arm (vector / keyword / title to depth 200, fused
 and post-rerank order from one `hybridSearch` call at limit 50, the final
 returned rows). It classifies the miss — (i) absent from every arm, (ii) in
@@ -684,8 +684,9 @@ the per-miss rows, `--all` diagnoses every scored question. It is not a
 ### Flags
 
 Every flag lives in one table in `src/commands/eval-longmemeval.ts`
-(`LME_FLAGS`) that drives both the parser and `--help`, so this list and the
-CLI cannot drift. Unknown flags exit 1 before any work starts.
+(`LME_FLAGS`) that drives both the parser and `--help`, so `--help` is the
+authoritative list. The table below is maintained by hand and can lag it.
+Unknown flags exit 1 before any work starts.
 
 | Flag | Default | Purpose |
 |---|---|---|
@@ -719,7 +720,7 @@ CLI cannot drift. Unknown flags exit 1 before any work starts.
 | `--max-usd N\|off` | 5 | Cap on JUDGE spend only (the reader / extractor lanes are not metered here). Preflight refuses an estimate over the cap without `--yes` (exit 2); at run time the lane soft-stops at the cap and stamps the remaining rows `judge_skipped: "budget"` (not publishable). An unpriced judge model requires `off` |
 | `--yes` | off | Proceed when the judge estimate exceeds `--max-usd` (the cap still soft-stops the run) |
 | `--judge-concurrency N` | 1 | Parallel judge calls during a `--resume-from` backfill (live rows are judged inline after each reader call) |
-| `--allow-incomplete-judgments` | off | Exit 0 even when `judge_errors > 0` or `skipped_budget > 0`. Default: such a run is NOT publishable (stderr `FAIL` line, exit 1) — re-run with `--judge --resume-from FILE` until both are 0 |
+| `--allow-incomplete-judgments` | off | Exit 0 even when `judge_errors > 0`, `skipped_budget > 0` or `unjudged > 0`. Default: such a run is NOT publishable (stderr `FAIL` line, exit 1) — re-run with `--judge --resume-from FILE` until all three are 0 |
 
 Row fields: `recall_all_hit`, `recall_any_hit`, `recall_hit` (a DEPRECATED alias
 of `recall_any_hit`, kept for v1 readers), `abstention`,
@@ -818,9 +819,12 @@ machine-readable form:
 `metric` names the headline: `all_rate` is strict `recall_all@k`, `any_rate`
 the lenient `recall_any@k` (rates are `null` on an empty bucket, never NaN).
 `excluded_abstention` counts the `_abs` questions kept out of the denominators
-(`--include-abstention` folds them in). `legacy_rows` counts rows folded from a
-pre-v2 file that carried only `recall_hit` (0 on a fresh run; when non-zero the
-`all_rate` is a lower bound). `run_config.cache` is `null` with a
+(`--include-abstention` folds them in). `legacy_rows` counts rows folded via
+`addRowToBucket` with only a `recall_hit` (when non-zero the `all_rate` is a
+lower bound). It is 0 on a fresh run AND on a resume: `--resume-from` re-scores
+every prior row (pre-v2 rows included) from its retrieved ids against the
+dataset's gold, so it only moves if a caller folds rows through
+`addRowToBucket` directly. `run_config.cache` is `null` with a
 `cache_skipped` reason when the embed cache was disabled, the run was
 `--keyword-only`, or no embedding gateway was configured.
 

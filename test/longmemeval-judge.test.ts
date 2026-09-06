@@ -48,7 +48,7 @@ import {
 } from '../src/eval/shared/judge-runner.ts';
 import { bootstrapMeanCi } from '../src/eval/shared/bootstrap.ts';
 import { buildQaAccuracy, dedupeQuestionRows } from '../src/eval/longmemeval/qa-accuracy.ts';
-import { judgePreflight, makeJudgeConfigHasher, parseMaxUsd, selectBackfillRows } from '../src/eval/longmemeval/judge-lane.ts';
+import { judgePreflight, makeJudgeConfigHasher, parseMaxUsd, runJudgeBackfill, selectBackfillRows } from '../src/eval/longmemeval/judge-lane.ts';
 import { READER_MAX_TOKENS, READER_PROMPT_SHA, READER_SYSTEM_TEXT, buildReaderUserText } from '../src/eval/longmemeval/reader.ts';
 import { sha256Hex } from '../src/eval/longmemeval/run-config.ts';
 import type { LongMemEvalQuestion } from '../src/eval/longmemeval/adapter.ts';
@@ -497,6 +497,65 @@ describe('qa-accuracy — headline vs excluding-errors vs 470 view', () => {
     ]);
     expect(dup).toHaveLength(1);
     expect(dup[0].judge_correct).toBe(true);
+  });
+
+  test('judge_config_hash / mixed_judge_config derive from the hashes ON the rows, not the launch flags', () => {
+    // A judge-only backfill launched without the original --model resolves a
+    // different run hash ('RUN'); every row was judged under 'H'. Homogeneous
+    // → NOT mixed, and the published hash is the one the rows carry.
+    const runOpts = { ...opts, judgeConfigHash: 'RUN' };
+    const homogeneous = buildQaAccuracy(rows.slice(0, 3), runOpts);
+    expect(homogeneous.mixed_judge_config).toBe(false);
+    expect(homogeneous.judge_config_hash).toBe('H');
+    // No row carries a hash → this run's hash, not mixed.
+    const unjudged = buildQaAccuracy([{ question_id: 'z', question_type: 't', hypothesis: 'h' }], runOpts);
+    expect(unjudged.mixed_judge_config).toBe(false);
+    expect(unjudged.judge_config_hash).toBe('RUN');
+    // Two distinct hashes on the rows → mixed even when one of them IS this run's.
+    const mixed = buildQaAccuracy([rows[0], { ...rows[1], judge_config_hash: 'RUN' }], runOpts);
+    expect(mixed.mixed_judge_config).toBe(true);
+    expect(mixed.judge_config_hash).toBe('RUN');
+  });
+});
+
+describe('runJudgeBackfill — a throw inside the judge lane is a counted judge_error, never a silent drop', () => {
+  const qs = new Map<string, LongMemEvalQuestion>([
+    ['a', { ...Q, question_id: 'a' } as unknown as LongMemEvalQuestion],
+    ['b', { ...Q, question_id: 'b' } as unknown as LongMemEvalQuestion],
+  ]);
+  test('the row whose hasher throws is stamped provider_error (redacted detail) and counted; the healthy row is judged', async () => {
+    const rows = [
+      { question_id: 'a', hypothesis: 'The Driftwood brand.', judge_correct: false, judge_config_hash: 'STALE' },
+      { question_id: 'b', hypothesis: 'The Driftwood brand.', judge_correct: false, judge_config_hash: 'STALE' },
+    ];
+    const { fn } = scriptedClient([okResult('Yes'), okResult('Yes')]);
+    const seen: string[] = [];
+    const res = await runJudgeBackfill(rows, {
+      client: fn,
+      model: DEFAULT_JUDGE_MODEL,
+      ledger: new BudgetLedger(null, null),
+      configHashFor: (input) => {
+        if (input.question_id === 'b') throw new Error('hasher exploded: token sk-abcdefghijklmnopqrstuvwxyz0123456789');
+        return 'H';
+      },
+    }, { concurrency: 2, questionByQid: qs, onRow: (row) => seen.push(row.question_id as string) });
+    expect(res).toEqual({ judged: 1, errors: 1, skipped: 0 });
+    expect(seen.sort()).toEqual(['a', 'b']); // progress ticked for BOTH rows
+    expect(rows[0].judge_correct).toBe(true);
+    expect(rows[0].judge_config_hash).toBe('H');
+    const failed = rows[1] as Record<string, unknown>;
+    expect(failed.judge_correct).toBeUndefined(); // stale verdict stripped
+    expect(failed.judge_error).toBe('provider_error');
+    expect(String(failed.judge_error_detail)).toContain('hasher exploded');
+    expect(String(failed.judge_error_detail)).not.toContain('abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(failed.judge_model).toBe(DEFAULT_JUDGE_MODEL);
+    expect(failed.judge_prompt_version).toBe(JUDGE_PROMPT_VERSION);
+    expect(failed.judge_config_hash).toBeUndefined(); // hasher failed → unstamped → re-judged on the next resume
+    // qa_accuracy sees the failure: incomplete, one judge_error.
+    const qa = buildQaAccuracy(rows, { judgeModel: DEFAULT_JUDGE_MODEL, judgePromptVersion: 'v', judgeConfigHash: 'H', estCostUsd: null, methodologyNote: 'n' });
+    expect(qa.complete).toBe(false);
+    expect(qa.judge_errors).toBe(1);
+    expect(qa.judge_error_classes).toEqual({ provider_error: 1 });
   });
 });
 

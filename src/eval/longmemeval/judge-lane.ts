@@ -23,6 +23,7 @@ import { BudgetLedger, isJudgeModelPriced } from '../shared/judge-runner.ts';
 import {
   JUDGE_MAX_TOKENS,
   JUDGE_PROMPT_VERSION,
+  JUDGE_RAW_MAX_CHARS,
   JUDGE_TEMPERATURE,
   estimateJudgeRunUsd,
   judgeConfigHash,
@@ -31,6 +32,7 @@ import {
   type JudgeLaneContext,
   type JudgePromptInput,
 } from './judge.ts';
+import { redactSecrets } from './run-config.ts';
 import type { LongMemEvalQuestion } from './adapter.ts';
 
 /** `--max-usd N|off`: `off` disables the cap (and lets an unpriced judge run). */
@@ -185,11 +187,29 @@ export interface BackfillResult {
   skipped: number;
 }
 
+/** The judge input for a prior row: the dataset's question/answer win; the row's own fields are the fallback. */
+function backfillInput(row: RowLike, q: LongMemEvalQuestion | undefined): JudgePromptInput & RowLike {
+  return {
+    ...row,
+    question_id: row.question_id as string,
+    question_type: q?.question_type ?? (typeof row.question_type === 'string' ? row.question_type : 'unknown'),
+    question: q?.question ?? (typeof row.question === 'string' ? row.question : ''),
+    answer: q?.answer ?? (typeof row.answer === 'string' ? row.answer : ''),
+    hypothesis: row.hypothesis as string,
+  };
+}
+
 /**
  * Judge prior rows from their stored hypothesis, `concurrency` at a time,
  * updating each row IN PLACE (prior judge_* keys stripped first so a
  * re-judge leaves no stale field behind). The dataset's answer is the
  * reference; the row's own `answer` is the fallback.
+ *
+ * INVARIANT: no candidate is left untouched. `judgeRow` never throws for a
+ * transport failure, but a throw from anywhere else (a hasher bug, an
+ * aborted signal, a malformed row) is stamped `judge_error: 'provider_error'`
+ * with the redacted message, so qa_accuracy counts it and the run-end gate
+ * refuses to publish instead of the row silently keeping its old state.
  */
 export async function runJudgeBackfill(
   candidates: ReadonlyArray<RowLike>,
@@ -197,20 +217,11 @@ export async function runJudgeBackfill(
   opts: { concurrency: number; questionByQid: ReadonlyMap<string, LongMemEvalQuestion>; onRow?: (row: RowLike) => void },
 ): Promise<BackfillResult> {
   const result: BackfillResult = { judged: 0, errors: 0, skipped: 0 };
-  await runWithLimit({
+  const settled = await runWithLimit({
     items: candidates,
     limit: Math.max(1, opts.concurrency),
     fn: async (row) => {
-      const q = opts.questionByQid.get(row.question_id as string);
-      const input: JudgePromptInput & RowLike = {
-        ...row,
-        question_id: row.question_id as string,
-        question_type: q?.question_type ?? (typeof row.question_type === 'string' ? row.question_type : 'unknown'),
-        question: q?.question ?? (typeof row.question === 'string' ? row.question : ''),
-        answer: q?.answer ?? (typeof row.answer === 'string' ? row.answer : ''),
-        hypothesis: row.hypothesis as string,
-      };
-      const fields = await judgeRow(input, ctx);
+      const fields = await judgeRow(backfillInput(row, opts.questionByQid.get(row.question_id as string)), ctx);
       stripJudgeFields(row);
       Object.assign(row, fields);
       if (typeof fields.judge_correct === 'boolean') result.judged++;
@@ -219,5 +230,20 @@ export async function runJudgeBackfill(
       opts.onRow?.(row);
     },
   });
+  for (const s of settled) {
+    if (s.ok) continue;
+    const row = candidates[s.idx];
+    const err = s.error as { message?: unknown } | undefined;
+    stripJudgeFields(row);
+    Object.assign(row, {
+      judge_error: 'provider_error',
+      judge_error_detail: redactSecrets(String(err?.message ?? s.error)).slice(0, JUDGE_RAW_MAX_CHARS),
+      judge_model: ctx.model,
+      judge_prompt_version: JUDGE_PROMPT_VERSION,
+    });
+    try { row.judge_config_hash = ctx.configHashFor(backfillInput(row, opts.questionByQid.get(row.question_id as string))); } catch { /* hasher failed: leave unstamped (re-judged on the next resume) */ }
+    result.errors++;
+    opts.onRow?.(row);
+  }
   return result;
 }

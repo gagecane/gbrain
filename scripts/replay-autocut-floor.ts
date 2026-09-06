@@ -185,11 +185,12 @@ function main(): void {
     process.stderr.write('replay-autocut-floor: no question rows with rerank_pool found\n');
     process.exit(1);
   }
-  // Gold join. Harness capture rows carry `gold_total` / `gold_found`, not the
-  // gold ids themselves; `--dataset` supplies `answer_session_ids` (raw ids —
-  // the pool rows' `session_id` is raw too). Scoring recall against an empty
-  // gold set would print 0% everywhere, so a capture with no gold anywhere and
-  // no dataset is refused rather than silently mis-scored.
+  // Gold join. Harness capture rows now carry `answer_session_ids` (raw ids —
+  // the pool rows' `session_id` is raw too) next to `gold_total` / `gold_found`;
+  // older captures carried only the counts, and `--dataset` back-fills the ids
+  // for those by question_id. Scoring recall against an empty gold set would
+  // print 0% everywhere, so a capture with no gold anywhere and no dataset is
+  // refused rather than silently mis-scored.
   if (args.dataset) {
     let gold: Map<string, string[]>;
     try {

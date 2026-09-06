@@ -33,7 +33,8 @@
  *
  * Usage:
  *   bun run scripts/r1-namedthing-rerank-ab.ts [--json] [--out receipt.json]
- *       [--embed-cache PATH] [--relational] [--limit 10] [--stub-embed] [--autocut on|off] [--relational-pin N|off]
+ *       [--embed-cache PATH] [--relational] [--limit 10] [--stub-embed]
+ *       [--autocut on|off] [--relational-pin N|off] [--search-pin search.KEY=VALUE]...
  *
  *   --stub-embed   hermetic dry run: the embed transport throws (the CI gate's
  *                  stub) so search takes the keyword + title + alias path; ONLY
@@ -41,6 +42,14 @@
  *                  (it needs VOYAGE_API_KEY + real embeddings).
  *   --relational   also seed the relational corpus and run its 42
  *                  graph-relationship questions (typed-edge arm; cheap).
+ *   --autocut / --relational-pin / --search-pin
+ *                  config overlays applied to BOTH arms on top of ARM_PINS, so
+ *                  the operator can run the pair in the exact shipped shape.
+ *                  `search.reranker.*` is RESERVED and refused (exit 2): the
+ *                  reranker is the arm axis — an overlay there would either run
+ *                  the ON arm on a model other than the one whose readiness was
+ *                  checked and that the receipt reports (R1_ON_RERANKER_MODEL),
+ *                  or silently turn ON into OFF.
  *
  * Exit: 0 R1 PASS (or stub dry run) · 1 R1 FAIL · 2 integrity / usage.
  */
@@ -471,7 +480,7 @@ interface Args {
   autocut?: 'on' | 'off';
   /** --relational-pin N|off — overlays search.relational_rerank_pin on BOTH arms (default: gbrain's bundle default). */
   relationalPin?: string;
-  /** --search-pin KEY=VALUE (repeatable) — arbitrary search.* overlay on BOTH arms. */
+  /** --search-pin KEY=VALUE (repeatable) — arbitrary search.* overlay on BOTH arms; `search.reranker.*` refused (see SEARCH_PIN_RESERVED). */
   searchPins?: Record<string, string>;
   json: boolean;
   out?: string;
@@ -481,9 +490,16 @@ interface Args {
   stubEmbed: boolean;
 }
 
+/**
+ * `--search-pin` keys the script refuses: the overlay lands on BOTH arms, and
+ * `search.reranker.*` is exactly what the two arms differ on. Exported so the
+ * test pins the reservation alongside the pins themselves.
+ */
+export const SEARCH_PIN_RESERVED = /^search\.reranker(\.|$)/;
+
 function usage(code: number): never {
   process.stderr.write(
-    'usage: bun run scripts/r1-namedthing-rerank-ab.ts [--json] [--out receipt.json] [--embed-cache PATH] [--relational] [--limit 10] [--stub-embed] [--autocut on|off] [--relational-pin N|off] [--search-pin KEY=VALUE]\n',
+    'usage: bun run scripts/r1-namedthing-rerank-ab.ts [--json] [--out receipt.json] [--embed-cache PATH] [--relational] [--limit 10] [--stub-embed] [--autocut on|off] [--relational-pin N|off] [--search-pin search.KEY=VALUE (search.reranker.* reserved)]\n',
   );
   process.exit(code);
 }
@@ -504,7 +520,23 @@ export function parseArgs(argv: string[]): Args {
     else if (x === '--relational') a.relational = true;
     else if (x === '--out') a.out = need(i++, x);
     else if (x === '--embed-cache') a.embedCache = need(i++, x);
-    else if (x === '--search-pin') { const v = need(i++, x); const eq = v.indexOf('='); const key = eq > 0 ? v.slice(0, eq).trim() : ''; const val = eq > 0 ? v.slice(eq + 1).trim() : ''; if (!key.startsWith('search.') || key === 'search.' || !val) { process.stderr.write(`--search-pin takes search.<key>=<value> (got ${v})\n`); usage(2); } a.searchPins = { ...(a.searchPins ?? {}), [key]: val }; }
+    else if (x === '--search-pin') {
+      const v = need(i++, x);
+      const eq = v.indexOf('=');
+      const key = eq > 0 ? v.slice(0, eq).trim() : '';
+      const val = eq > 0 ? v.slice(eq + 1).trim() : '';
+      if (!key.startsWith('search.') || key === 'search.' || !val) {
+        process.stderr.write(`--search-pin takes search.<key>=<value> (got ${v})\n`);
+        usage(2);
+      }
+      if (SEARCH_PIN_RESERVED.test(key)) {
+        // The reranker is the arm axis: the ON arm always runs R1_ON_RERANKER_MODEL
+        // (readiness-checked, receipt-reported) and the OFF arm always has it off.
+        process.stderr.write(`--search-pin cannot overlay ${key}: search.reranker.* is the ON/OFF arm axis (the ON arm always runs ${R1_ON_RERANKER_MODEL})\n`);
+        usage(2);
+      }
+      a.searchPins = { ...(a.searchPins ?? {}), [key]: val };
+    }
     else if (x === '--relational-pin') { const v = need(i++, x); if (!/^(off|[0-9]|10)$/.test(v)) { process.stderr.write(`--relational-pin takes 0-10 or off (got ${v})\n`); usage(2); } a.relationalPin = v; }
     else if (x === '--autocut') { const v = need(i++, x); if (v !== 'on' && v !== 'off') { process.stderr.write(`--autocut takes on|off (got ${v})\n`); usage(2); } a.autocut = v as 'on' | 'off'; }
     else if (x === '--limit') {

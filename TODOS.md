@@ -1121,7 +1121,6 @@ deferred M-effort issues above are NOT repeated here.
   a low-cosine-scale embedder degrades `exists`→`probable` and loosens the
   don't-create-a-duplicate contract. Calibrate BEFORE the September embedder
   default flip, and include a per-model floor table, not one global number.
-  **In progress:** R2 receipts running in the v0.48.3.0 wave (offline `applyAutocut` replay via `scripts/replay-autocut-floor.ts`); the entry closes when they land.
 - [ ] **P2 — Cat 3 undocumented-alias enrichment.** The gbrain-evals Cat 3 runner's
   undocumented class (initials, nicknames, typos) needs alias-TABLE growth
   (enrichment writes page_aliases), not resolver changes — the v0.46.15 alias_exact
@@ -8928,7 +8927,33 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
   `src/core/search/hybrid.ts` fusion assembly (`allLists`),
   `expansion.ts`. Receipt: gbrain-evals
   `lme-phase6-8bb33cac-k5.{ndjson,json}`. **Effort:** M.
-  **In progress:** receipts running in the v0.48.3.0 wave (`search.expansion_variant_budget` arm, null = legacy; decided on the held-out questions per the pre-registered rule); the entry closes when they land.
+  **DECIDED (v0.48.3.0 ranker wave, 2026-09-06):** budget-normalized weighted
+  RRF landed as `search.expansion_variant_budget` (`fusion-lists.ts`; null =
+  legacy, byte-identical). Replaying the SAME recorded Haiku variants, strict
+  recall_all@5 climbs monotonically as the budget shrinks (255/470 legacy →
+  394/470 at 0.25) — the mechanism is real — but the pre-registered rule
+  (≥ plain hybrid − 2 on the 430 decision set, no type > 1 loss) failed at
+  every budget (0.25: −43; multi-session −20, temporal −17). Bundles stay
+  `null`; the knob ships for operators. The remaining gap is what the
+  CRAG-style trigger addresses (next entry).
+- [ ] **P2 — conditional (CRAG-style) expansion: expand only when the original
+  query's evidence is weak.** **What:** the ranker wave showed that no
+  constant weight makes LLM multi-query expansion earn its keep at k=5 on
+  LongMemEval (see the previous entry): variants help the ~3 questions the
+  original query misses and hurt ~45 it already gets. The receipts point at
+  a TRIGGER, not a weight: run expansion only when the original vector list's
+  evidence is weak (top cosine below a per-embedder floor, or the keyword arm
+  empty AND the fused top-k scores flat), and fuse the variants at the
+  budgeted weight when it fires. **Rule (write before the run):** on the 430
+  decision set, tokenmax(trigger) ≥ balanced-with-reranker − 2 and no type
+  > 1 loss, with the trigger firing on ≤ 25% of questions; dev-slice-only for
+  the floor choice. **Where:** `src/core/search/crag.ts` already carries the
+  confidence-escalation seam (config-gated, default off) — reuse its
+  evidence signal rather than a new module; `hybrid.ts` expansion gate;
+  `fusion-lists.ts` roles. **Receipts:** A3/A3′/A3′R rows in
+  `docs/eval/FIX_WAVE_BASELINES.md` and the gbrain-evals 2026-09-06 report.
+  **Effort:** M. **Priority:** P2.
+
 - [ ] **P3 — IPC probe-field version echo.** **What:** a NEW reflex client
   against an OLD long-running `gbrain serve` sends `probe:'volunteer'` that
   the serve ignores, logging the wide ungated pool as delivered pointers on

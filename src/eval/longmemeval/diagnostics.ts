@@ -435,6 +435,14 @@ export interface ReceiptRow {
   retrieval_config_hash?: string;
 }
 
+/**
+ * The pins a receipt was produced under, as read back from its
+ * `by_type_summary.run_config`. The harness (`run-config.ts:buildRunConfig`)
+ * writes them FLAT on `run_config` (`mode`, `reranker: {enabled, model}`,
+ * `autocut`, `expansion`, `expansion_variant_budget`, `embedder`, `topK`);
+ * `pinsFromReceipt` normalizes that shape here (`topK` → `top_k`) and still
+ * accepts the legacy nested `run_config.pins` block.
+ */
 export interface ReceiptSummaryPins {
   mode?: string;
   reranker?: { enabled?: boolean; model?: string };
@@ -445,10 +453,13 @@ export interface ReceiptSummaryPins {
   embedder?: string;
 }
 
+/** `run_config` as the harness writes it (flat pins, `topK`), plus the legacy nested `pins` block. */
+export type ReceiptRunConfig = Omit<ReceiptSummaryPins, 'top_k'> & { topK?: number; pins?: ReceiptSummaryPins; [k: string]: unknown };
+
 export interface ParsedReceipt {
   rows: ReceiptRow[];
-  /** The `by_type_summary` line when present (pins live under `run_config.pins`). */
-  summary: { k?: number; run_config?: { pins?: ReceiptSummaryPins; [k: string]: unknown }; [k: string]: unknown } | null;
+  /** The `by_type_summary` line when present (pins are flat on `run_config`). */
+  summary: { k?: number; run_config?: ReceiptRunConfig; [k: string]: unknown } | null;
 }
 
 /** Parse a harness ndjson receipt; corrupt lines are skipped, the summary line is separated. */
@@ -472,9 +483,32 @@ export function parseReceipt(text: string): ParsedReceipt {
   return { rows, summary };
 }
 
-/** Pins the receipt was produced under (explicit CLI flags beat these). */
+/**
+ * Pins the receipt was produced under (explicit CLI flags beat these). Reads the
+ * flat `run_config` the harness writes (`topK` → `top_k`); a legacy nested
+ * `run_config.pins` block fills any key the flat shape leaves undefined. Only
+ * keys that are present come back, so an empty summary yields `{}`.
+ */
 export function pinsFromReceipt(parsed: ParsedReceipt): ReceiptSummaryPins {
-  return parsed.summary?.run_config?.pins ?? {};
+  const rc = parsed.summary?.run_config;
+  if (!rc) return {};
+  const legacy = rc.pins ?? {};
+  const out: ReceiptSummaryPins = {};
+  const mode = rc.mode ?? legacy.mode;
+  if (typeof mode === 'string') out.mode = mode;
+  const reranker = rc.reranker ?? legacy.reranker;
+  if (reranker && typeof reranker === 'object') out.reranker = reranker;
+  const autocut = rc.autocut ?? legacy.autocut;
+  if (typeof autocut === 'boolean') out.autocut = autocut;
+  const expansion = rc.expansion ?? legacy.expansion;
+  if (typeof expansion === 'boolean') out.expansion = expansion;
+  if (rc.expansion_variant_budget !== undefined) out.expansion_variant_budget = rc.expansion_variant_budget;
+  else if (legacy.expansion_variant_budget !== undefined) out.expansion_variant_budget = legacy.expansion_variant_budget;
+  const topK = rc.topK ?? legacy.top_k;
+  if (typeof topK === 'number') out.top_k = topK;
+  const embedder = rc.embedder ?? legacy.embedder;
+  if (typeof embedder === 'string') out.embedder = embedder;
+  return out;
 }
 
 /**

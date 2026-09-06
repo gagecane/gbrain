@@ -3,17 +3,51 @@
  *
  * Hermetic: the wrapped "paid command" is a shell one-liner that writes a
  * marker file (proving it ran) and optionally an actual-cost file. Env is
- * passed to spawnSync, never mutated on process.env.
+ * passed to spawn/spawnSync, never mutated on process.env.
+ *
+ * Every launch writes TWO ledger rows sharing a run_id: a `running`
+ * reservation (cost = estimate) BEFORE the command starts and a `done`
+ * reconciliation after it exits. `doneRows()` is the recorded outcome;
+ * `ledgerRows()` is the raw file.
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+  appendFileSync,
+  chmodSync,
+  existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const ROOT = process.cwd();
 const SCRIPT = join(ROOT, 'scripts/eval-spend-guard.sh');
+
+// A chmod-444 file is still appendable under CAP_DAC_OVERRIDE (root, some
+// sandboxes); the unwritable-ledger pin needs the kernel to honor the bits.
+function permissionsEnforced(): boolean {
+  const d = mkdtempSync(join(tmpdir(), 'gbrain-spend-guard-probe-'));
+  try {
+    const f = join(d, 'ro');
+    writeFileSync(f, '');
+    chmodSync(f, 0o444);
+    try {
+      appendFileSync(f, 'x');
+      return false;
+    } catch {
+      return true;
+    }
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+}
+const PERMS_ENFORCED = permissionsEnforced();
 
 let dir: string;
 let ledger: string;
@@ -30,15 +64,39 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function run(args: string[], extraEnv: Record<string, string> = {}) {
-  const env: Record<string, string> = {
+function guardEnv(extraEnv: Record<string, string> = {}): Record<string, string> {
+  return {
     PATH: process.env.PATH ?? '/usr/bin:/bin',
     HOME: dir,
     TMPDIR: dir,
     GBRAIN_EVAL_SPEND_LEDGER: ledger,
     ...extraEnv,
   };
-  return spawnSync('bash', [SCRIPT, ...args], { cwd: ROOT, encoding: 'utf-8', env });
+}
+
+function run(args: string[], extraEnv: Record<string, string> = {}) {
+  return spawnSync('bash', [SCRIPT, ...args], { cwd: ROOT, encoding: 'utf-8', env: guardEnv(extraEnv) });
+}
+
+/** Async launch for the in-flight / signal pins. */
+function start(args: string[]) {
+  const child = spawn('bash', [SCRIPT, ...args], { cwd: ROOT, env: guardEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', (d: Buffer) => {
+    stderr += d.toString();
+  });
+  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.on('exit', (code, signal) => resolve({ code, signal }));
+  });
+  return { child, exit, stderr: () => stderr };
+}
+
+async function waitFor(pred: () => boolean, what: string, ms = 8000): Promise<void> {
+  const t0 = Date.now();
+  while (!pred()) {
+    if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 25));
+  }
 }
 
 function ledgerRows(): Array<Record<string, unknown>> {
@@ -48,21 +106,36 @@ function ledgerRows(): Array<Record<string, unknown>> {
     .filter((l) => l.trim().length > 0)
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
+const doneRows = () => ledgerRows().filter((r) => r.status === 'done');
+const runningRows = () => ledgerRows().filter((r) => r.status === 'running');
 
 describe('eval-spend-guard.sh', () => {
-  test('under cap: runs the command and appends the estimate as cost', () => {
+  test('under cap: runs the command; reservation row then reconciliation row share a run_id', () => {
     const marker = join(dir, 'ran.txt');
     const r = run(['75', '3', '--', 'sh', '-c', `echo ok > "${marker}"`]);
     expect(r.status).toBe(0);
     expect(existsSync(marker)).toBe(true);
     expect(r.stderr).toContain('launching');
+    expect(r.stderr).toContain('reserved $3.000000');
+    expect(r.stderr).toContain('recorded cost $3.000000 (exit 0); ledger now $3.000000');
     const rows = ledgerRows();
-    expect(rows.length).toBe(1);
-    expect(rows[0].estimate_usd).toBe(3);
-    expect(rows[0].cost_usd).toBe(3);
-    expect(rows[0].exit_code).toBe(0);
-    expect(String(rows[0].command)).toContain('echo ok');
-    expect(String(rows[0].ts)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    expect(rows.length).toBe(2);
+    const [reserved, done] = rows;
+    expect(reserved.status).toBe('running');
+    expect(reserved.estimate_usd).toBe(3);
+    expect(reserved.cost_usd).toBe(3);
+    expect(reserved.exit_code).toBeNull();
+    expect(typeof reserved.run_id).toBe('string');
+    expect(String(reserved.run_id).length).toBeGreaterThan(8);
+    expect(done.status).toBe('done');
+    expect(done.run_id).toBe(reserved.run_id);
+    expect(done.estimate_usd).toBe(3);
+    expect(done.cost_usd).toBe(3);
+    expect(done.exit_code).toBe(0);
+    for (const row of rows) {
+      expect(String(row.command)).toContain('echo ok');
+      expect(String(row.ts)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    }
   });
 
   test('over cap: refuses with exit 3, never runs the command, appends nothing', () => {
@@ -85,7 +158,7 @@ describe('eval-spend-guard.sh', () => {
     writeFileSync(ledger, '{"cost_usd":72}\n');
     const r = run(['75', '3', '--', 'true']);
     expect(r.status).toBe(0);
-    expect(ledgerRows().length).toBe(2);
+    expect(ledgerRows().length).toBe(3);
   });
 
   test('actual-cost file written by the command overrides the estimate (bare number)', () => {
@@ -94,9 +167,10 @@ describe('eval-spend-guard.sh', () => {
       GBRAIN_EVAL_ACTUAL_COST_FILE: costFile,
     });
     expect(r.status).toBe(0);
-    const rows = ledgerRows();
-    expect(rows[0].estimate_usd).toBe(3);
-    expect(rows[0].cost_usd).toBe(1.2345);
+    const [done] = doneRows();
+    expect(done.estimate_usd).toBe(3);
+    expect(done.cost_usd).toBe(1.2345);
+    expect(runningRows()[0].cost_usd).toBe(3); // the reservation keeps the estimate
   });
 
   test('actual-cost file as JSON {cost_usd} is honored; unset env gets a scratch path exported to the child', () => {
@@ -109,20 +183,20 @@ describe('eval-spend-guard.sh', () => {
       `test -n "$GBRAIN_EVAL_ACTUAL_COST_FILE" && printf '{"cost_usd": 0.5, "note":"x"}' > "$GBRAIN_EVAL_ACTUAL_COST_FILE"`,
     ]);
     expect(r.status).toBe(0);
-    expect(ledgerRows()[0].cost_usd).toBe(0.5);
+    expect(doneRows()[0].cost_usd).toBe(0.5);
   });
 
   test('command failure: exit code propagates and is recorded', () => {
     const r = run(['75', '1', '--', 'sh', '-c', 'exit 7']);
     expect(r.status).toBe(7);
-    expect(ledgerRows()[0].exit_code).toBe(7);
+    expect(doneRows()[0].exit_code).toBe(7);
   });
 
   test('command text with quotes and backslashes yields valid JSON', () => {
     const r = run(['75', '1', '--', 'sh', '-c', 'echo "a \\"b\\" \\\\ c"']);
     expect(r.status).toBe(0);
     const rows = ledgerRows(); // JSON.parse would have thrown on a bad line
-    expect(rows.length).toBe(1);
+    expect(rows.length).toBe(2);
     expect(String(rows[0].command)).toContain('echo');
   });
 
@@ -138,7 +212,107 @@ describe('eval-spend-guard.sh', () => {
     expect(run(['10', '3', '--', 'true']).status).toBe(0);
     const r = run(['10', '2', '--', 'true']); // 9 + 2 > 10
     expect(r.status).toBe(3);
-    expect(ledgerRows().length).toBe(2);
+    expect(ledgerRows().length).toBe(4);
+  });
+
+  // ── reservation / reconciliation (fail closed in TIME) ──────────────────
+
+  test('the reservation is on the ledger while the command runs, blocks a concurrent guard, and is superseded by the reconciliation', async () => {
+    const g = start(['10', '6', '--', 'sh', '-c', 'sleep 2; printf 2 > "$GBRAIN_EVAL_ACTUAL_COST_FILE"']);
+    await waitFor(() => runningRows().length === 1, 'the reservation row');
+    const [reserved] = ledgerRows();
+    expect(ledgerRows().length).toBe(1);
+    expect(reserved.status).toBe('running');
+    expect(reserved.cost_usd).toBe(6);
+    expect(reserved.exit_code).toBeNull();
+
+    // A concurrent guard sees $6 in flight: 6 + 5 > 10 → refused, nothing run.
+    const marker = join(dir, 'should-not-exist.txt');
+    const c = run(['10', '5', '--', 'sh', '-c', `echo no > "${marker}"`]);
+    expect(c.status).toBe(3);
+    expect(existsSync(marker)).toBe(false);
+    expect(c.stderr).toContain('ledger $6.000000 + estimate $5.000000');
+    expect(c.stderr).toContain('1 in-flight reservation(s)');
+
+    const { code } = await g.exit;
+    expect(code).toBe(0);
+    const rows = ledgerRows();
+    expect(rows.length).toBe(2);
+    expect(rows[1].status).toBe('done');
+    expect(rows[1].run_id).toBe(reserved.run_id);
+    expect(rows[1].cost_usd).toBe(2);
+    expect(rows[1].exit_code).toBe(0);
+    expect(g.stderr()).toContain('ledger now $2.000000');
+
+    // Reconciled total is $2 (NOT 6 + 2): 2 + 8 == 10 is allowed.
+    const n = run(['10', '8', '--', 'true']);
+    expect(n.status).toBe(0);
+    expect(n.stderr).toContain('ledger $2.000000 (2 row(s))');
+    expect(n.stderr).not.toContain('in-flight');
+  });
+
+  test('a SIGTERMed guard stops the command and reconciles at the estimate (exit 143)', async () => {
+    const g = start(['10', '4', '--', 'sleep', '30']);
+    await waitFor(() => runningRows().length === 1, 'the reservation row');
+    const t0 = Date.now();
+    g.child.kill('SIGTERM');
+    const { code } = await g.exit;
+    expect(code).toBe(143);
+    expect(Date.now() - t0).toBeLessThan(10_000); // the child was killed, not waited out
+    expect(g.stderr()).toContain('interrupted (signal 15)');
+    const rows = ledgerRows();
+    expect(rows.length).toBe(2);
+    expect(rows[1].status).toBe('done');
+    expect(rows[1].run_id).toBe(rows[0].run_id);
+    expect(rows[1].cost_usd).toBe(4); // the estimate
+    expect(rows[1].exit_code).toBe(143);
+    // …and that spend drives the next decision: 4 + 7 > 10.
+    expect(run(['10', '7', '--', 'true']).status).toBe(3);
+    expect(run(['10', '6', '--', 'true']).status).toBe(0);
+  });
+
+  test('a SIGKILLed guard leaves its reservation counted at the estimate for the next guard', async () => {
+    const g = start(['10', '4', '--', 'sleep', '3']);
+    await waitFor(() => runningRows().length === 1, 'the reservation row');
+    g.child.kill('SIGKILL');
+    const { signal } = await g.exit;
+    expect(signal).toBe('SIGKILL');
+    expect(ledgerRows().length).toBe(1); // no reconciliation could be written
+    const r = run(['10', '7', '--', 'true']); // 4 (in flight forever) + 7 > 10
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain('1 in-flight reservation(s)');
+    const ok = run(['10', '6', '--', 'true']);
+    expect(ok.status).toBe(0);
+    expect(ok.stderr).toContain('1 in-flight reservation(s) counted at their estimate');
+  });
+
+  test('audit: legacy rows are final, an orphan reservation counts, a reconciled reservation does not, a run_id-less running row is final', () => {
+    writeFileSync(
+      ledger,
+      '{"cost_usd":3}\n' + // legacy row (no run_id/status)
+        '{"run_id":"dead-guard","status":"running","estimate_usd":4,"cost_usd":4,"exit_code":null}\n' +
+        '{"run_id":"b","status":"running","estimate_usd":9,"cost_usd":9,"exit_code":null}\n' +
+        '{"run_id":"b","status":"done","estimate_usd":9,"cost_usd":1,"exit_code":0}\n' +
+        '{"status":"running","cost_usd":0.5}\n', // can never be reconciled → final
+    );
+    // 3 + 4 + 1 + 0.5 = 8.5; the $9 reservation for run b is superseded.
+    const r = run(['10', '1.5', '--', 'true']);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain('ledger $8.500000 (5 row(s))');
+    expect(r.stderr).toContain('1 in-flight reservation(s)');
+    expect(run(['10', '1', '--', 'true']).status).toBe(3); // 10 + 1 > 10
+  });
+
+  test.skipIf(!PERMS_ENFORCED)('an unwritable ledger refuses the launch (exit 3): a run that is not on the books cannot be capped', () => {
+    writeFileSync(ledger, '{"cost_usd":1}\n');
+    chmodSync(ledger, 0o444);
+    const marker = join(dir, 'should-not-exist.txt');
+    const r = run(['75', '1', '--', 'sh', '-c', `echo no > "${marker}"`]);
+    expect(r.status).toBe(3);
+    expect(existsSync(marker)).toBe(false);
+    expect(r.stderr).toContain('cannot append the reservation row');
+    expect(r.stderr).toContain('command NOT run');
+    expect(ledgerRows().length).toBe(1); // unchanged
   });
 
   // ── fail-closed ledger integrity ─────────────────────────────────────────
@@ -212,7 +386,7 @@ describe('eval-spend-guard.sh', () => {
     expect(run(['75', '1.', '--', 'true']).status).toBe(0);
     expect(run(['75', '.5', '--', 'true']).status).toBe(0);
     expect(run(['75', '2e-1', '--', 'true']).status).toBe(0);
-    const rows = ledgerRows(); // JSON.parse would throw on `1.` or `.5`
+    const rows = doneRows(); // JSON.parse would throw on `1.` or `.5`
     expect(rows.map((r) => r.estimate_usd)).toEqual([1, 0.5, 0.2]);
     expect(rows.map((r) => r.cost_usd)).toEqual([1, 0.5, 0.2]);
     const raw = readFileSync(ledger, 'utf-8');
@@ -231,7 +405,7 @@ describe('eval-spend-guard.sh', () => {
     });
     expect(r.status).toBe(0);
     expect(readFileSync(ledger, 'utf-8')).toContain('"cost_usd":0.500000');
-    expect(ledgerRows()[0].cost_usd).toBe(0.5);
+    expect(doneRows()[0].cost_usd).toBe(0.5);
   });
 
   test('a negative, signed, zero, or string-typed actual cost falls back to the estimate', () => {
@@ -253,7 +427,7 @@ describe('eval-spend-guard.sh', () => {
       expect(r.status, payload).toBe(0);
       expect(r.stderr, payload).toContain(note);
       expect(r.stderr, payload).toContain('estimate');
-      const rows = ledgerRows();
+      const rows = doneRows();
       expect(rows.length, payload).toBe(1);
       expect(rows[0].cost_usd, payload).toBe(3); // the estimate, never a negative or zero row
       rmSync(costFile, { force: true });
@@ -293,11 +467,11 @@ describe('eval-spend-guard.sh', () => {
     expect(existsSync(marker)).toBe(true);
     expect(r.stderr).toContain('NEW LEDGER');
     expect(r.stderr).toContain(ledger);
-    expect(ledgerRows().length).toBe(1);
+    expect(ledgerRows().length).toBe(2);
     // A second run with INIT still set does NOT re-announce (the file exists now).
     const r2 = run(['75', '1', '--', 'true'], { GBRAIN_EVAL_SPEND_LEDGER_INIT: '1' });
     expect(r2.status).toBe(0);
     expect(r2.stderr).not.toContain('NEW LEDGER');
-    expect(ledgerRows().length).toBe(2);
+    expect(ledgerRows().length).toBe(4);
   });
 });
