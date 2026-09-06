@@ -89,6 +89,13 @@ command runs through `scripts/eval-spend-guard.sh 75 <estimate> -- …`
   the same shape (`r1-namedthing-release-receipt.json`): core hit@1 10→11,
   relational 21/27 both arms, 0 losses; BrainBench PASS (same-hash); retrieval
   canary PASS → **gate D11 PASS**, no flip reverted.
+- **Judged answer accuracy (Phase D, release configuration):** 433/500 =
+  **86.6%** (CI 83.6–89.6), 500/500 judged, 0 judge errors; abstention 29/30;
+  per type SSA 100 / SSU 98.6 / KU 89.7 / MS 83.5 / TR 80.5 / SSP 66.7. Reader
+  `anthropic:claude-sonnet-4-6` (full sessions, mean 63.6K chars), judge
+  `openai:gpt-4o` (2024-08-06), official prompts, temperature 0, max_tokens 16.
+  Evidence-complete 449/470; reader converts 396 of them. Prediction ≥ 92%
+  MISSED; no SOTA claim (pre-registered); matched-reader row not run (budget).
 - **`tokenmax` as released (legacy expansion weight, reranker on, autocut
   off; frozen A3 variants):** 436/470 (92.77%), +2 / −15 vs the balanced
   release path (multi-session −7, temporal −5); +186 / −5 vs A3. The

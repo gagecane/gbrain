@@ -483,8 +483,9 @@ MemCog, Zep, Hindsight, ByteRover and Supermemory are LLM-judged answer
 accuracy, a different quantity that moves with the reader and judge model.
 gbrain's own judged answer-accuracy lane (`--judge`, "Judged answer accuracy"
 below) uses the official prompts and judge model with full protocol
-disclosure; its first number is not yet published, and it carries no SOTA
-claim because those competitor numbers are protocol-unmatched. Full report,
+disclosure; its first number is 86.6% (433/500, v0.48.3.0, default Sonnet
+reader, gpt-4o judge — see "Judged answer accuracy" below), and it carries no
+SOTA claim because those competitor numbers are protocol-unmatched. Full report,
 comparison table, and receipts:
 [gbrain-evals `docs/benchmarks/2026-05-07-longmemeval-s.md`](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-05-07-longmemeval-s.md).
 
@@ -566,6 +567,32 @@ the OpenAI API's minimum; the official 10 is rejected, and a one-token yes/no
 verdict is unaffected. Gold and hypothesis sit inside a data-boundary wrapper
 (disclosed deviation). Every row carries the provider-reported reader and
 judge snapshot ids and the reader prompt sha.
+
+**Result (2026-09-06, v0.48.3.0, 500/500 judged, 0 judge errors, `complete: true`):**
+
+| Slice | Correct | Accuracy |
+|---|---|---|
+| **All 500 (headline)** | **433/500** | **86.6%** (95% CI 83.6–89.6, question-sampling only) |
+| Non-abstention 470 | 404/470 | 86.0% |
+| Abstention 30 | 29/30 | 96.7% |
+| single-session-assistant | 56/56 | 100.0% |
+| single-session-user | 69/70 | 98.6% |
+| knowledge-update | 70/78 | 89.7% |
+| multi-session | 111/133 | 83.5% |
+| temporal-reasoning | 107/133 | 80.5% |
+| single-session-preference | 20/30 | 66.7% |
+
+Evidence versus verdict on the 470 non-abstention questions: every gold
+session retrieved AND correct 396; every gold session retrieved but judged
+wrong 53; incomplete evidence but correct 8; incomplete and wrong 13. Retrieval
+on the same rows is the release number (449/470 strict), so the reader
+converts 88.2% of evidence-complete questions — the remaining loss is the
+answering layer (preference and temporal questions most of all). Reader
+snapshot `claude-sonnet-4-6`, judge snapshot `gpt-4o-2024-08-06`, mean reader
+context 63.6K characters, 0 sessions truncated. The pre-registered prediction
+(≥ 92%) was missed. Competitor answer-accuracy rows (OMEGA 95.4%, Mastra
+94.87%, Mem0 93.4%) use different readers, prompts, judges and dataset
+revisions; this row makes no comparison claim in either direction.
 
 The second lane. Instead of asking whether the gold sessions were retrieved,
 it asks whether the READER's answer was right: the reader answers each

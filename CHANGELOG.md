@@ -156,6 +156,20 @@ is in `docs/eval-bench.md`.
   knowledge-update; any-hit ≥ 99.4% at every floor; mean returned window
   3256 → 1633 estimated tokens at 0.35. No floor met the guardrail on either
   seeded half, so autocut is off in balanced and tokenmax.
+- **First judged answer-accuracy number: 433/500 (86.6%, 95% CI 83.6–89.6).**
+  Release retrieval (449/470 evidence-complete on the same rows), reader
+  `anthropic:claude-sonnet-4-6` at max_tokens 512 reading the full text of
+  every retrieved session, judge `openai:gpt-4o` (snapshot 2024-08-06) with
+  the official `evaluate_qa.py` prompt per question type; 500 of 500 judged,
+  0 judge errors. Per type: single-session-assistant 100%, single-session-user
+  98.6%, knowledge-update 89.7%, multi-session 83.5%, temporal-reasoning
+  80.5%, single-session-preference 66.7%; abstention 29/30. Of the 449
+  questions whose every gold session was retrieved, the reader answered 396
+  correctly — the remaining loss sits in the reader and judge, not retrieval.
+  This is below the 92% we pre-registered and below the 93–95% figures other
+  systems publish; those use different readers, prompts and judges, so this
+  row carries no comparison claim in either direction. Protocol and receipts
+  in `docs/eval-bench.md` and the gbrain-evals report.
 - **Temporal reasoning: located, not fixed.** Every missed gold session on
   the diagnosis half sits at vector rank 6–15 and fuses at exactly that rank;
   the loss is the embedding ranking of near-duplicate sessions, not fusion,
