@@ -267,7 +267,9 @@ describe('slug collision touching gold → error row (plan D32)', () => {
     // again → counted once by the live path), mc-1 is re-scored from the file.
     await runEvalLongMemEval([fixture, ...BASE, '--output', out, '--resume-from', out], { engine });
     const resumed = splitRows(out);
-    expect(resumed.rows.map(r => r.question_id)).toEqual(['col-1', 'mc-1', 'col-1']); // appended: prior error row + retry row
+    // Appended during the run (prior error row + retry row), then compacted to one row per question_id (last wins).
+    expect(resumed.rows.map(r => r.question_id)).toEqual(['col-1', 'mc-1']);
+    expect(resumed.rows.find(r => r.question_id === 'col-1')!.error).toContain('slug_collision'); // the RETRY's abort row is the survivor
     expect(resumed.summary.run_config.slug_collisions).toBe(summary.run_config.slug_collisions);
     expect(resumed.summary.run_config.gold_missing_from_haystack).toBe(summary.run_config.gold_missing_from_haystack);
     expect(resumed.summary.slug_collisions).toBe(1);

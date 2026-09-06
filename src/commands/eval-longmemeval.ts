@@ -78,7 +78,7 @@ import {
   type RowLike,
 } from '../eval/longmemeval/judge-lane.ts';
 import { anyRowJudged, buildQaAccuracy, type QaAccuracyBlock } from '../eval/longmemeval/qa-accuracy.ts';
-import { emitByTypeSummary, makeEmitter } from '../eval/longmemeval/emit.ts';
+import { emitByTypeSummary, makeEmitter, compactJsonlByQuestionId } from '../eval/longmemeval/emit.ts';
 import type { BudgetLedger, JudgeChatFn } from '../eval/shared/judge-runner.ts';
 import {
   addRowToBucket,
@@ -127,7 +127,7 @@ import {
   type ResolvedSearchKnobs,
   type SearchMode,
 } from '../core/search/mode.ts';
-import { estimateTokens } from '../core/search/token-budget.ts';
+import { buildCaptureExtras } from '../eval/longmemeval/capture.ts';
 import { resolveModel } from '../core/model-config.ts';
 import type { ThinkLLMClient } from '../core/think/index.ts';
 import { createProgress } from '../core/progress.ts';
@@ -902,9 +902,14 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
       if (sel.missingFromDataset > 0) process.stderr.write(`[longmemeval] WARN judge backfill: ${sel.missingFromDataset} row(s) not in this dataset — left unjudged\n`);
       backfill = sel.candidates;
       process.stderr.write(`[longmemeval] judge backfill: ${backfill.length} row(s) to judge from their stored hypothesis; ${sel.settled} verdict(s) stand\n`);
-    } else if (opts.outputPath && opts.resumeFromPath === opts.outputPath) appendOutput = true;
+    }
+    // Same-file resume ALWAYS appends (judge or not): rows persist as they land, so a
+    // timeout/kill loses at most the in-flight question; the file is compacted to one
+    // row per question_id (last wins) before the summary is written.
+    if (opts.outputPath && opts.resumeFromPath === opts.outputPath) appendOutput = true;
     if (questions.length === 0 && backfill.length === 0) {
       process.stderr.write(`[longmemeval] resume: nothing to do (all questions already answered${opts.judge ? ' and judged' : ''}).\n`);
+      if (opts.outputPath && opts.outputPath === opts.resumeFromPath) compactJsonlByQuestionId(opts.outputPath);
       if (opts.judge && opts.outputPath && opts.outputPath !== opts.resumeFromPath) {
         // A judge resume into a DIFFERENT output still copies the prior rows
         // forward, so the new file is complete (rows + the summary below).
@@ -1169,13 +1174,19 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
         await runJudgeBackfill(backfill, judgeCtx, {
           concurrency: opts.judgeConcurrency,
           questionByQid,
-          onRow: (row) => progress.tick(1, `${String(row.question_id)} (judge)`),
+          onRow: (row) => {
+            progress.tick(1, `${String(row.question_id)} (judge)`);
+            // Append mode: persist the judged row NOW as a newer duplicate (compacted at run end).
+            if (appendOutput) emitter.emit(row);
+          },
         });
       }
       for (const row of keptPrior) {
         if (row.kind === 'by_type_summary' || typeof row.question_id !== 'string') continue;
         qaRows.push(row);
-        if (opts.judge) emitter.emit(row);
+        // Rewrite into a DIFFERENT file: carry every prior row forward. Same-file
+        // append: the rows are already on disk.
+        if (opts.judge && !appendOutput) emitter.emit(row);
       }
       for (const q of questions) {
         const qStart = Date.now();
@@ -1186,7 +1197,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
             Object.assign(outcome.row, await judgeRow({
               ...outcome.row,
               question_id: q.question_id, question_type: q.question_type, question: q.question,
-              answer: q.answer ?? '', hypothesis: outcome.row.hypothesis,
+              answer: String(q.answer ?? ''), hypothesis: outcome.row.hypothesis, // 32 LongMemEval golds are integers
             }, judgeCtx));
           }
           emitter.emit(outcome.row);
@@ -1226,6 +1237,12 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     } finally {
       progress.finish();
       emitter.close();
+      if (appendOutput && opts.outputPath) {
+        const c = compactJsonlByQuestionId(opts.outputPath);
+        if (c.superseded > 0 || c.summaries_dropped > 0) {
+          process.stderr.write(`[longmemeval] resume: compacted ${opts.outputPath} to ${c.rows} row(s) (${c.superseded} superseded, ${c.summaries_dropped} stale summary line(s))\n`);
+        }
+      }
       if (cache) {
         try {
           const s = cache.stats();
@@ -1263,9 +1280,6 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
   });
 }
 
-function poolKey(r: SearchResult): string {
-  return `${r.slug}#${r.chunk_id}`;
-}
 
 async function runOneQuestion(
   engine: PGLiteEngine,
@@ -1452,39 +1466,7 @@ async function runOneQuestion(
       methodology_note: TRAJECTORY_METHODOLOGY_NOTE,
     } : {}),
   };
-  if (pool) {
-    // rerank_pool (plan D24): EVERY row of the pool hybridSearch hands to
-    // applyAutocut, in pool order — including unscored alias-hop / exact-lookup
-    // injected rows (they carry no rerank_score; the replay's preserve
-    // predicate keeps them exactly as the live cut did). `rrf_rank` is the
-    // pre-rerank RRF position when the hook supplied it (cliff attribution:
-    // fusion vs reranking) and otherwise the pool position; `pool_rank` is
-    // always the 1-based position in the captured pool.
-    const rrfRank = new Map<string, number>();
-    (preRerank ?? []).forEach((r, i) => rrfRank.set(poolKey(r), i + 1));
-    extra.rerank_pool = pool.map((r, i) => ({
-      slug: r.slug,
-      chunk_id: r.chunk_id,
-      session_id: rawSessionId(r.slug, slugToRaw),
-      rrf_rank: rrfRank.get(poolKey(r)) ?? i + 1,
-      pool_rank: i + 1,
-      ...(Number.isFinite(r.rerank_score) ? { rerank_score: r.rerank_score } : {}),
-      ...(r.alias_hit === true ? { alias_hit: true } : {}),
-      ...(r.exact_lookup !== undefined ? { exact_lookup: true } : {}),
-      // Mirrors hybrid.ts's autocut predicates: pinned relational rows are
-      // preserved through the cut AND excluded from its cliff math.
-      ...(r.relational_pinned === true ? { relational_pinned: true } : {}),
-      est_tokens: estimateTokens(r.chunk_text),
-    }));
-    // Autocut on (a decision was recorded): when the kept count equals the
-    // rows we got back, the returned rows ARE the kept set — record their
-    // keys so the replay validates the cut byte-for-byte (otherwise it
-    // validates at count/gap level; a further limit/budget slice hides the
-    // exact set).
-    if (meta?.autocut && meta.autocut.kept === results.length) {
-      extra.autocut_kept_keys = results.map(poolKey);
-    }
-  }
+  Object.assign(extra, buildCaptureExtras({ pool, preRerank, meta, results, slugToRaw }));
 
   const row = buildRow({ question: q, hypothesis, results, k: opts.topK, slugToRaw, mode: opts.mode, extra });
   return { row, rerankerSkipped, vectorDegraded, expansionFailed };

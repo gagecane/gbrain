@@ -129,8 +129,10 @@ export function judgePromptKind(questionId: string, questionType: string): Judge
 }
 
 /** Neutralise `<judge_input>` / `</judge_input>` inside graded data (case-preserving) so the data cannot close the envelope. */
-export function escapeJudgeData(text: string): string {
-  return text.replace(/<\/?\s*judge_input\b[^>]*>/gi, m => `&lt;${m.slice(1, -1)}&gt;`);
+export function escapeJudgeData(text: string | number | null | undefined): string {
+  // Integer golds (32 of the 500 LongMemEval-S answers) arrive as numbers; the
+  // official evaluator interpolates them with an f-string, i.e. their decimal form.
+  return String(text ?? '').replace(/<\/?\s*judge_input\b[^>]*>/gi, m => `&lt;${m.slice(1, -1)}&gt;`);
 }
 
 export interface JudgePromptInput {

@@ -72,6 +72,45 @@ export function makeEmitter(outputPath?: string, append: boolean = false, option
   };
 }
 
+/**
+ * Compact an appended resume file to ONE row per question_id (the LAST
+ * occurrence wins — a judged backfill row or a retry supersedes the row it
+ * duplicates), dropping summary lines (the caller re-emits the summary).
+ * Order is the first-seen order of question ids. Written atomically
+ * (`<path>.compact.tmp` + rename) so a kill mid-compaction leaves the
+ * appended file intact. Returns the row counts for the run log.
+ */
+export function compactJsonlByQuestionId(outputPath: string): { rows: number; superseded: number; summaries_dropped: number } {
+  if (!existsSync(outputPath)) return { rows: 0, superseded: 0, summaries_dropped: 0 };
+  const order: string[] = [];
+  const latest = new Map<string, string>();
+  let superseded = 0;
+  let summaries = 0;
+  const passthrough: string[] = [];
+  for (const line of readFileSync(outputPath, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    let row: { question_id?: unknown; kind?: unknown } | null = null;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue; // corrupt tail (SIGKILL) — dropped, the resume loader never trusted it either
+    }
+    if (row && typeof row === 'object' && row.kind === 'by_type_summary') { summaries++; continue; }
+    if (row && typeof row === 'object' && typeof row.question_id === 'string') {
+      if (latest.has(row.question_id)) superseded++;
+      else order.push(row.question_id);
+      latest.set(row.question_id, line);
+      continue;
+    }
+    passthrough.push(line);
+  }
+  const out = [...passthrough, ...order.map((id) => latest.get(id)!)];
+  const tmp = `${outputPath}.compact.tmp`;
+  writeFileSync(tmp, out.length > 0 ? out.join('\n') + '\n' : '', 'utf8');
+  renameSync(tmp, outputPath);
+  return { rows: order.length, superseded, summaries_dropped: summaries };
+}
+
 /** Emit the by_type_summary as the final line (replacing any prior summary line) with its glossary block. */
 export function emitByTypeSummary(outputPath: string | undefined, summary: ByTypeSummaryV2): void {
   const keys = [`recall_all@${summary.k}`, `recall_any@${summary.k}`, ...(summary.qa_accuracy ? ['qa_accuracy'] : [])];

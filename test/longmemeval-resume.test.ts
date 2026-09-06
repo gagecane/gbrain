@@ -9,7 +9,10 @@
  *     SCORED rows feed the buckets.
  */
 import { describe, test, expect } from 'bun:test';
-import { seedBucketsFromRows } from '../src/eval/longmemeval/resume.ts';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { seedBucketsFromRows, readJsonlRows, loadResumeSet } from '../src/eval/longmemeval/resume.ts';
 import type { RecallBucket } from '../src/eval/longmemeval/metrics.ts';
 
 describe('seedBucketsFromRows — gold_missing / slug_collisions row set', () => {
@@ -49,5 +52,42 @@ describe('seedBucketsFromRows — gold_missing / slug_collisions row set', () =>
     expect(res.collisions).toBe(3);
     expect(res.seeded).toBe(2);
     expect(res.excludedAbstention).toBe(0);
+  });
+});
+
+describe('appended resume files: last row per question_id wins', () => {
+  const write = (rows: unknown[]) => {
+    const dir = mkdtempSync(join(tmpdir(), 'lme-resume-'));
+    const p = join(dir, 'run.ndjson');
+    writeFileSync(p, rows.map((r) => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n') + '\n');
+    return { p, dir };
+  };
+
+  test('readJsonlRows dedupes question rows last-wins at the first-seen position; summary rows pass through', () => {
+    const { p, dir } = write([
+      { question_id: 'q1', hypothesis: 'old' },
+      { kind: 'by_type_summary' },
+      { question_id: 'q2', hypothesis: 'x' },
+      { question_id: 'q1', hypothesis: 'new', judge_correct: false },
+    ]);
+    try {
+      const rows = readJsonlRows(p);
+      expect(rows.map((r) => r.question_id ?? r.kind)).toEqual(['q1', 'by_type_summary', 'q2']);
+      expect(rows[0]).toEqual({ question_id: 'q1', hypothesis: 'new', judge_correct: false });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('loadResumeSet: an appended retry supersedes an earlier error row (done), and a later error row re-opens a question', () => {
+    const { p, dir } = write([
+      { question_id: 'q1', error: 'boom', hypothesis: '' },
+      { question_id: 'q1', hypothesis: 'answered on retry' },
+      { question_id: 'q2', hypothesis: 'fine' },
+      { question_id: 'q2', error: 'later failure', hypothesis: '' },
+      { question_id: 'q3', error: 'boom', hypothesis: '' },
+    ]);
+    try {
+      const done = loadResumeSet(p);
+      expect([...done].sort()).toEqual(['q1']);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

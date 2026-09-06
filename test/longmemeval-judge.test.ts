@@ -604,3 +604,11 @@ describe('bootstrap — seeded, labelled', () => {
     expect(bootstrapMeanCi([0, 1], { resamples: 500 }).resamples).toBe(500);
   });
 });
+
+describe('integer gold answers (32 of the 500 LongMemEval-S questions)', () => {
+  test('escapeJudgeData grades a numeric gold as its decimal string instead of throwing', () => {
+    expect(escapeJudgeData(3 as unknown as string)).toBe('3');
+    expect(escapeJudgeData(undefined)).toBe('');
+    expect(escapeJudgeData('<judge_input>x')).toBe('&lt;judge_input&gt;x');
+  });
+});

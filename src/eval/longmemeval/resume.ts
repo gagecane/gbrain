@@ -22,15 +22,28 @@ import {
   type RecallBucket,
 } from './metrics.ts';
 
-/** Parse a JSONL file into rows; corrupt lines are skipped (SIGKILL tail). */
+/**
+ * Parse a JSONL file into rows; corrupt lines are skipped (SIGKILL tail).
+ * Question rows are deduped LAST-WINS per question_id (a same-file resume
+ * APPENDS judged-backfill rows and retries as newer duplicates and compacts
+ * only at run end — see emit.ts compactJsonlByQuestionId), keeping the
+ * first-seen position; non-question rows (summary) pass through in place.
+ */
 export function readJsonlRows(path: string): Array<Record<string, unknown>> {
   if (!existsSync(path)) return [];
   const out: Array<Record<string, unknown>> = [];
+  const slot = new Map<string, number>();
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     if (!line.trim()) continue;
     try {
       const row = JSON.parse(line);
-      if (row && typeof row === 'object' && !Array.isArray(row)) out.push(row as Record<string, unknown>);
+      if (!(row && typeof row === 'object' && !Array.isArray(row))) continue;
+      const r = row as Record<string, unknown>;
+      if (typeof r.question_id === 'string' && r.kind !== 'by_type_summary') {
+        const at = slot.get(r.question_id);
+        if (at === undefined) { slot.set(r.question_id, out.length); out.push(r); }
+        else out[at] = r;
+      } else out.push(r);
     } catch {
       // corrupt line — the resume loader logs these; here we just skip
     }
@@ -181,20 +194,22 @@ export function loadResumeSet(resumePath: string): Set<string> {
   const done = new Set<string>();
   if (!existsSync(resumePath)) return done;
   let lineNo = 0;
+  // Last row per question_id decides (an appended retry supersedes an error row).
+  const last = new Map<string, boolean>();
   for (const line of readFileSync(resumePath, 'utf8').split('\n')) {
     lineNo++;
     if (!line.trim()) continue;
-    let row: { question_id?: string; hypothesis?: string; error?: string };
+    let row: { question_id?: string; hypothesis?: string; error?: string; kind?: string };
     try {
       row = JSON.parse(line);
     } catch {
       process.stderr.write(`[longmemeval] resume: skipping corrupt line ${lineNo}\n`);
       continue;
     }
-    if (typeof row.question_id !== 'string') continue;
-    if (row.error && (!row.hypothesis || row.hypothesis === '')) continue;
-    done.add(row.question_id);
+    if (typeof row.question_id !== 'string' || row.kind === 'by_type_summary') continue;
+    last.set(row.question_id, !(row.error && (!row.hypothesis || row.hypothesis === '')));
   }
+  for (const [qid, ok] of last) if (ok) done.add(qid);
   return done;
 }
 

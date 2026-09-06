@@ -7,7 +7,7 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { makeEmitter, emitByTypeSummary } from '../src/eval/longmemeval/emit.ts';
+import { makeEmitter, emitByTypeSummary, compactJsonlByQuestionId } from '../src/eval/longmemeval/emit.ts';
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'lme-emit-')); });
@@ -71,5 +71,34 @@ describe('makeEmitter', () => {
     expect(rows[0]).toEqual({ question_id: 'q1', judge_correct: false });
     expect(rows[1].kind).toBe('by_type_summary');
     expect(rows[1].stale).toBeUndefined();
+  });
+});
+
+describe('compactJsonlByQuestionId (append-as-you-go resume files)', () => {
+  test('keeps the LAST row per question_id in first-seen order, drops summary lines and a corrupt tail, and is atomic', () => {
+    const p = join(dir, 'run.ndjson');
+    writeFileSync(p, [
+      JSON.stringify({ question_id: 'q1', hypothesis: 'v1' }),
+      JSON.stringify({ question_id: 'q2', error: 'reader failed', hypothesis: '' }),
+      JSON.stringify({ kind: 'by_type_summary', stale: true }),
+      JSON.stringify({ question_id: 'q1', hypothesis: 'v1', judge_correct: true }),   // judged backfill duplicate
+      JSON.stringify({ question_id: 'q2', hypothesis: 'retry answer' }),            // retry supersedes the error row
+      JSON.stringify({ question_id: 'q3', hypothesis: 'v3' }),
+      '{"question_id":"q4","hypo',                                                  // SIGKILL tail
+    ].join('\n') + '\n');
+    const c = compactJsonlByQuestionId(p);
+    expect(c).toEqual({ rows: 3, superseded: 2, summaries_dropped: 1 });
+    expect(lines(p)).toEqual([
+      { question_id: 'q1', hypothesis: 'v1', judge_correct: true },
+      { question_id: 'q2', hypothesis: 'retry answer' },
+      { question_id: 'q3', hypothesis: 'v3' },
+    ]);
+    expect(existsSync(`${p}.compact.tmp`)).toBe(false);
+    // Idempotent.
+    expect(compactJsonlByQuestionId(p)).toEqual({ rows: 3, superseded: 0, summaries_dropped: 0 });
+  });
+
+  test('a missing file is a no-op', () => {
+    expect(compactJsonlByQuestionId(join(dir, 'nope.ndjson'))).toEqual({ rows: 0, superseded: 0, summaries_dropped: 0 });
   });
 });

@@ -158,10 +158,10 @@ export function judgePreflight(input: JudgePreflightInput): JudgePreflightResult
     };
   }
   const items = [
-    ...input.live.map(q => ({ question: q.question, answer: q.answer ?? '', hypothesisTokens: input.readerMaxTokens })),
+    ...input.live.map(q => ({ question: q.question, answer: String(q.answer ?? ''), hypothesisTokens: input.readerMaxTokens })),
     ...input.backfill.map(r => ({
       question: typeof r.question === 'string' ? r.question : '',
-      answer: typeof r.answer === 'string' ? r.answer : '',
+      answer: r.answer === undefined || r.answer === null ? '' : String(r.answer),
       hypothesisTokens: estimateTokens(typeof r.hypothesis === 'string' ? r.hypothesis : ''),
     })),
   ];
@@ -194,7 +194,7 @@ function backfillInput(row: RowLike, q: LongMemEvalQuestion | undefined): JudgeP
     question_id: row.question_id as string,
     question_type: q?.question_type ?? (typeof row.question_type === 'string' ? row.question_type : 'unknown'),
     question: q?.question ?? (typeof row.question === 'string' ? row.question : ''),
-    answer: q?.answer ?? (typeof row.answer === 'string' ? row.answer : ''),
+    answer: String(q?.answer ?? row.answer ?? ''), // integer golds (32 in LongMemEval-S) are graded as their decimal string, as Python's f-string does
     hypothesis: row.hypothesis as string,
   };
 }
