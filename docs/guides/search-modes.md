@@ -13,7 +13,12 @@ Two decisions shape every gbrain lookup, and this guide covers both:
 ## The three mode bundles
 
 A search mode is a named preset that sets every search-cost knob at once.
-The bundles are frozen in `src/core/search/mode.ts` (`MODE_BUNDLES`):
+The bundles are frozen in `src/core/search/mode.ts` (`MODE_BUNDLES`).
+
+Semantic result caching is temporarily disabled in every mode, regardless of
+configuration or per-call overrides. The cache settings below are retained
+configuration values; each request performs fresh retrieval. Stored cache rows
+and maintenance commands remain available.
 
 | Knob                          | `conservative` | `balanced` | `tokenmax`     |
 |-------------------------------|----------------|------------|----------------|
@@ -121,11 +126,11 @@ Per-knob resolution (highest first):
 
 Mode resolution lives in bare `hybridSearch`, not just the cached wrapper,
 so eval replays test the same mode-affected behavior as the production
-`query` op. The query cache folds the active knobs into its key
-(`knobs_hash`), so switching modes never serves you a stale result set
-from a different configuration. Cache hits honor the same result-count
-resolution as misses (per-call `limit`, else the mode's `searchLimit`) —
-a cached page is sliced to what you asked for, never a fixed count.
+`query` op. Result counts follow the per-call `limit`, or the mode's
+`searchLimit` when no limit is supplied. The wrapper does not read or write
+stored semantic results while caching is disabled. `gbrain search modes`
+reports effective `cache_enabled: false`, and `cache stats` reports
+`enabled: false`, even when retained configuration enables the cache.
 
 ### Cost intuition
 
@@ -140,9 +145,10 @@ Rough anchors at 10K queries/month, full payload, no cache savings:
 | balanced (~10K tok) | \$100/mo | \$300/mo | \$500/mo |
 | tokenmax (~20K tok) | \$200/mo | \$600/mo | **\$1,000/mo** |
 
-Scales linearly with volume. Cache hits cut all numbers ~50%; disciplined
-prompt caching in the agent loop cuts further. Mismatched pairings waste
-capacity in both directions — a tokenmax payload overwhelms a cheap model,
+Scales linearly with volume. Budget for fresh retrieval on every query while
+semantic result caching is disabled; repeated searches may take longer and use
+more provider calls. Downstream prompt caching in the agent loop is independent.
+Mismatched pairings waste capacity in both directions — a tokenmax payload overwhelms a cheap model,
 a conservative payload starves an expensive one. The full methodology and
 realistic-scale walkthrough live in
 [`docs/eval/SEARCH_MODE_METHODOLOGY.md`](../eval/SEARCH_MODE_METHODOLOGY.md).

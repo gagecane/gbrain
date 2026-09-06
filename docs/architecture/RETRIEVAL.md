@@ -46,7 +46,7 @@ Heuristic link-type inference (`attended`, `works_at`, `invested_in`, `founded`,
 
 ## Cross-encoder reranker: 60% top-1 reshuffle
 
-The reranker is on for the `balanced` and `tokenmax` mode bundles, off for `conservative`. The mode-bundle default is Voyage `rerank-2.5` (`DEFAULT_RERANKER_MODEL`, same `VOYAGE_API_KEY` as the embedding default); a brain with no `search.reranker.model` row reranks with it. Without the key, search fails open in RRF order: the gateway skips the HTTP call (`RerankError('no_key')`), writes ONE audit row per process, prints nothing, and stamps `reranker_skipped (no_key)` on the search meta — `gbrain search --explain` shows it, `gbrain search modes` prints a `Reranker:` readiness line, and `gbrain doctor`'s `reranker_health` names the fix (`export VOYAGE_API_KEY=…` or `gbrain config set search.reranker.enabled false`). Keyed installs without a Voyage key get reranking explicitly disabled at init. An explicit ZeroEntropy `zerank-*` config (`LEGACY_DEFAULT_RERANKER_MODEL`; hosted API ends 2026-09-04) short-circuits past that date before any HTTP: one audit row per process per model plus a single stderr line naming the switch command, and `gbrain doctor`'s `provider_sunset` check explains the state; a `base_urls` recipe override (self-hosted wire-compatible endpoint) suppresses the short-circuit. `reranker_model` is folded into the query-cache key unconditionally, so a model change can never serve a result set reranked by a different model. On a real-corpus benchmark across 20 queries, the cross-encoder reshuffled **60% of top-1 results** after the hybrid + RRF + graph stack (measured on zerank-2). The Voyage default's paired LongMemEval numbers live in [`docs/eval-bench.md`](../eval-bench.md#public-benchmarks-longmemeval).
+The reranker is on for the `balanced` and `tokenmax` mode bundles, off for `conservative`. The mode-bundle default is Voyage `rerank-2.5` (`DEFAULT_RERANKER_MODEL`, same `VOYAGE_API_KEY` as the embedding default); a brain with no `search.reranker.model` row reranks with it. Without the key, search fails open in RRF order: the gateway skips the HTTP call (`RerankError('no_key')`), writes ONE audit row per process, prints nothing, and stamps `reranker_skipped (no_key)` on the search meta — `gbrain search --explain` shows it, `gbrain search modes` prints a `Reranker:` readiness line, and `gbrain doctor`'s `reranker_health` names the fix (`export VOYAGE_API_KEY=…` or `gbrain config set search.reranker.enabled false`). Keyed installs without a Voyage key get reranking explicitly disabled at init. An explicit ZeroEntropy `zerank-*` config (`LEGACY_DEFAULT_RERANKER_MODEL`; hosted API ends 2026-09-04) short-circuits past that date before any HTTP: one audit row per process per model plus a single stderr line naming the switch command, and `gbrain doctor`'s `provider_sunset` check explains the state; a `base_urls` recipe override (self-hosted wire-compatible endpoint) suppresses the short-circuit. The retained query-cache key includes `reranker_model`; persisted result reuse is disabled until every response dependency can be verified. On a real-corpus benchmark across 20 queries, the cross-encoder reshuffled **60% of top-1 results** after the hybrid + RRF + graph stack (measured on zerank-2). The Voyage default's paired LongMemEval numbers live in [`docs/eval-bench.md`](../eval-bench.md#public-benchmarks-longmemeval).
 
 The mechanical reason: hybrid ranking is locally optimal per strategy but globally suboptimal. A cross-encoder reranker reads the query + each candidate document jointly, with full attention. It catches the cases where the vector + keyword + graph signals all agreed on a document that's semantically related but topically wrong.
 
@@ -139,7 +139,9 @@ Expansion is opt-in per mode bundle (`tokenmax` on by default; `balanced` + `con
 
 ## Putting it together
 
-The full pipeline for a `query` op:
+The full pipeline for a trusted local `query` op follows. Remote retrieval
+omits the optional code-graph augmentation stage; the policy-filtered typed-edge
+relational recall arm remains available.
 
 ```
 intent classify (query-intent.ts — deterministic, no LLM)
@@ -214,8 +216,12 @@ Two cross-cutting seams sit around the pipeline rather than inside it:
   recall arm filters `visibility: private` pages via the shared predicate in
   `src/core/search/private-visibility.ts` (fail-closed default; operator
   opt-outs documented in `docs/operations/mcp-surface-runbook.md`). The
-  posture folds into the query-cache key, so trusted and untrusted runs never
-  share cache rows.
+  same policy also authorizes contributing pages, link origins, dates and
+  annotations before enrichment. Semantic result caching is temporarily
+  disabled regardless of configuration; each request performs fresh retrieval.
+  Query embeddings can still be reused within that request. Repeated searches
+  may have higher latency and provider usage until caching can verify every
+  response dependency.
 - **CRAG-style confidence gate.** `src/core/search/crag.ts` grades every
   `query` op result (`strong`/`moderate`/`weak`) from the already-stamped
   honesty signals — zero LLM, zero added latency — and attaches the grade to
@@ -345,3 +351,42 @@ gbrain eval --qrels labels.tsv --config balanced.json
 The current measured LongMemEval result (93.19% session-level `recall_all@5`, cleaned S split, 470 scored questions, k=5, measured 2026-09-02 at gbrain v0.48.2.0), its per-type table, and the reranker-on arms live in [`docs/eval-bench.md`](../eval-bench.md#public-benchmarks-longmemeval).
 
 Methodology + metric glossary in [`docs/eval/SEARCH_MODE_METHODOLOGY.md`](../eval/SEARCH_MODE_METHODOLOGY.md).
+
+## Restricted salience
+
+Remote reads default to the `world` take holder when no grant is supplied; an
+explicit empty grant permits no takes. Counts and average weights use only
+permitted active takes. Stored emotional weight contributes zero because it
+combines all holders. Recent-salience inclusion uses `updated_at`, while the
+existing recency formula is retained; unrestricted local reads keep their
+existing formulas. Deleted, quarantined and archived contributors are excluded
+before ranking, limits and anomaly-baseline aggregation. Default remote page
+privacy also excludes private pages; its documented opt-outs do not widen
+take-holder permissions.
+
+
+## Chunk rebuilds after upgrading
+
+Markdown chunk creation applies the strict protected-body sanitizer before
+splitting text. For remote reads, all existing chunks are withheld until a
+successful rebuild records the current chunker version. Public pages require
+this rebuild too; trusted local chunk reads remain available. Body or chunk changes
+invalidate that record until the next successful rebuild. Direct page reads
+continue to use current source and visibility policy plus body sanitization.
+
+Run rebuild commands from a local installation on the brain host; thin clients
+cannot rebuild the host's indexes.
+`gbrain reindex --markdown --dry-run --no-embed` previews the existing rebuild.
+`gbrain reindex --markdown --no-embed` rebuilds without embedding calls, replacing
+previous vectors; use `gbrain embed --stale` later to restore semantic retrieval
+when provider usage is authorized. The regular reindex path rebuilds and embeds.
+Code pages use `gbrain reindex-code --force --no-embed`. Existing image indexes
+require reimporting the source files; images whose OCR contains protected
+sections remain unavailable to remote chunk retrieval. No schema migration is
+required.
+
+
+Optional code-graph expansion is omitted from remote search. The six dedicated
+code-inspection operations are also temporarily local-only; see the
+[MCP surface runbook](../operations/mcp-surface-runbook.md#temporary-code-inspection-availability).
+These restrictions are separate from the chunk rebuild requirement.

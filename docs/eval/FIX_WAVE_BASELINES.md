@@ -23,7 +23,7 @@ touch `~/.gbrain` per the eval discipline — results land in
 `<repo>/.gbrain-evals/eval-results.jsonl`). Record the gate verdict + headline
 metrics here per run.
 
-## Ranker wave (2026-09-06, branch stuttgart, v0.48.3.0)
+## Ranker wave (2026-09-06, branch stuttgart, v0.48.4.0)
 
 The read-path wave whose receipt producer is the in-repo harness
 (`gbrain eval longmemeval`: strict `recall_all@5` plus the new judged

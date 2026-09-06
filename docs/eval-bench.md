@@ -395,7 +395,7 @@ distinct retrieved sessions; retrieval only, no reader model. Any-hit
   recall denominator, as the official `print_retrieval_metrics.py` does, so
   470 are scored. The ceiling at k=5 is 99.4%: 3 questions carry 6 gold
   sessions and cannot fit in a top-5 list.
-- **Measured:** 2026-09-06 at gbrain v0.48.3.0 with `gbrain eval longmemeval`
+- **Measured:** 2026-09-06 at gbrain v0.48.4.0 with `gbrain eval longmemeval`
   (this repo; the sibling runner's 2026-09-02 receipt is reproduced by the A1
   parity row: 439 vs 438 of 470, 469 of 470 rows agree per question, any-hit
   identical), k=5, embedder `openai:text-embedding-3-large` at 1536 dims
@@ -413,7 +413,7 @@ right that A1 missed / questions it loses that A1 had.
 | A1 hybrid, reranker off, autocut off (like-for-like row) | **93.40%** (439/470) | 98.72% | 4.90 | +0 / −0 | 403/430 |
 | A2 hybrid + reranker (`voyage:rerank-2.5`), autocut off | **95.53%** (449/470) | 99.79% | 4.89 | +18 / −8 | 412/430 |
 | A3 hybrid + LLM multi-query expansion, legacy weighting (`--expansion`) | **54.26%** (255/470) | 84.89% | 5.00 | +3 / −187 | 231/430 |
-| A4 the default that shipped before v0.48.3.0 (reranker on, autocut 0.35) | **80.64%** (379/470) | 99.36% | 2.36 | +16 / −76 | 344/430 |
+| A4 the default that shipped before v0.48.4.0 (reranker on, autocut 0.35) | **80.64%** (379/470) | 99.36% | 2.36 | +16 / −76 | 344/430 |
 | A3′ hybrid + expansion at `expansion_variant_budget` 0.25, reranker off | **83.83%** (394/470) | 97.45% | 5.00 | +3 / −48 | 360/430 |
 | A3′R `tokenmax` + expansion at 0.25, reranker on, autocut 0.35 | **81.06%** (381/470) | 99.15% | 2.30 | +12 / −10 vs A4 | 347/430 |
 | `tokenmax` as released (legacy expansion, reranker on, autocut off) | **92.77%** (436/470) | 99.57% | 4.19 | +2 / −15 vs A2 | 400/430 |
@@ -483,7 +483,7 @@ MemCog, Zep, Hindsight, ByteRover and Supermemory are LLM-judged answer
 accuracy, a different quantity that moves with the reader and judge model.
 gbrain's own judged answer-accuracy lane (`--judge`, "Judged answer accuracy"
 below) uses the official prompts and judge model with full protocol
-disclosure; its first number is 86.6% (433/500, v0.48.3.0, default Sonnet
+disclosure; its first number is 86.6% (433/500, v0.48.4.0, default Sonnet
 reader, gpt-4o judge — see "Judged answer accuracy" below), and it carries no
 SOTA claim because those competitor numbers are protocol-unmatched. Full report,
 comparison table, and receipts:
@@ -517,7 +517,7 @@ gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
   --mode balanced --reranker off --autocut off \
   --output ~/lme-receipts/hybrid.ndjson
 
-# The shipped default path (what balanced/tokenmax run: reranker on, autocut off since v0.48.3.0).
+# The shipped default path (what balanced/tokenmax run: reranker on, autocut off since v0.48.4.0).
 # --reranker on preflights reranker readiness (exit 2 with the fix if it cannot
 # run) and fails the run if any row fell through un-reranked. Note the 95.32%
 # row above was reranker on with autocut OFF (`--reranker on --autocut off`).
@@ -554,7 +554,7 @@ gbrain eval longmemeval ~/datasets/longmemeval/longmemeval_s_cleaned.json \
 
 ### Judged answer accuracy (`--judge`)
 
-**Protocol (v0.48.3.0).** Retrieval = the release default (`balanced`,
+**Protocol (v0.48.4.0).** Retrieval = the release default (`balanced`,
 reranker on, autocut off, k=5). Reader context = the FULL text of every
 distinct session among the top-5 retrieved chunk rows, wrapped in
 `<chat_session>` blocks (the sanitizer's 4000-char cap is an extractor-era
@@ -568,7 +568,7 @@ verdict is unaffected. Gold and hypothesis sit inside a data-boundary wrapper
 (disclosed deviation). Every row carries the provider-reported reader and
 judge snapshot ids and the reader prompt sha.
 
-**Result (2026-09-06, v0.48.3.0, 500/500 judged, 0 judge errors, `complete: true`):**
+**Result (2026-09-06, v0.48.4.0, 500/500 judged, 0 judge errors, `complete: true`):**
 
 | Slice | Correct | Accuracy |
 |---|---|---|

@@ -9,10 +9,12 @@
  * Cosine re-score: blend 0.7*rrf + 0.3*cosine for query-specific ranking
  */
 
+import { sanitizeRemoteBody } from '../remote-body.ts';
 import type { BrainEngine } from '../engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
 import type {
   SearchResult,
+  PageReadPolicy,
   SearchOpts,
   HybridSearchMeta,
   DegradedStage,
@@ -20,6 +22,8 @@ import type {
   DegradedReason,
 } from '../types.ts';
 import { affectsRecall } from '../types.ts';
+import { hasReadPolicy, pageReadFilter } from './read-policy-sql.ts';
+import { requiresSafeChunks } from './safe-chunks.ts';
 import { embed, embedQuery } from '../embedding.ts';
 import { registerBackgroundWorkDrainer } from '../background-work.ts';
 import { isDbAccessFailure } from '../pg-access-classify.ts';
@@ -75,6 +79,7 @@ import {
 import {
   SemanticQueryCache,
   loadCacheConfig,
+  semanticResultCacheAvailable,
 } from './query-cache.ts';
 
 export const RRF_K = 60;
@@ -143,14 +148,14 @@ const pendingCacheWrites = new Set<Promise<unknown>>();
  * candidate pool. Fail-open: the warning is best-effort and never breaks search.
  * Mirrors the stampEvidence post-fusion precedent (T4).
  */
-export async function stampContentFlags(engine: BrainEngine, results: SearchResult[]): Promise<void> {
+export async function stampContentFlags(engine: BrainEngine, results: SearchResult[], policy?: PageReadPolicy): Promise<void> {
   if (results.length === 0) return;
   try {
     const ids = [...new Set(
       results.map((r) => r.page_id).filter((n): n is number => typeof n === 'number' && Number.isFinite(n)),
     )];
     if (ids.length === 0) return;
-    const flags = await engine.getContentFlagsByPageIds(ids);
+    const flags = await engine.getContentFlagsByPageIds(ids, policy);
     if (flags.size === 0) return;
     for (const r of results) {
       const f = flags.get(r.page_id);
@@ -180,6 +185,7 @@ export async function stampContentFlags(engine: BrainEngine, results: SearchResu
 export async function stampUnverifiedExtractions(
   engine: BrainEngine,
   results: SearchResult[],
+  policy?: PageReadPolicy,
 ): Promise<void> {
   if (results.length === 0) return;
   try {
@@ -187,7 +193,7 @@ export async function stampUnverifiedExtractions(
       results.map((r) => r.page_id).filter((n): n is number => typeof n === 'number' && Number.isFinite(n)),
     )];
     if (ids.length === 0) return;
-    const marks = await engine.getUnverifiedExtractionPageIds(ids);
+    const marks = await engine.getUnverifiedExtractionPageIds(ids, policy);
     if (marks.size === 0) return;
     for (const r of results) {
       const m = marks.get(r.page_id);
@@ -497,7 +503,7 @@ export function applyChronicleTypeBoost(
  *
  * Mutates `results` in place; caller re-sorts.
  */
-export interface PostFusionOpts {
+export interface PostFusionOpts extends PageReadPolicy {
   applyBacklinks: boolean;
   salience: 'off' | 'on' | 'strong';
   recency: 'off' | 'on' | 'strong';
@@ -573,6 +579,7 @@ export async function runPostFusionStages(
   opts: PostFusionOpts,
 ): Promise<void> {
   if (results.length === 0) return;
+  const policy = hasReadPolicy(opts) ? opts : undefined;
 
   // v0.40.4 attribution stamp (D12=A) — capture base_score ONCE at entry,
   // BEFORE any boost mutates r.score. Without this, --explain can't
@@ -597,7 +604,7 @@ export async function runPostFusionStages(
   if (metadata && opts.applyBacklinks) {
     try {
       const pageIds = Array.from(new Set(results.map(r => r.page_id)));
-      const counts = await engine.getBacklinkCounts(pageIds);
+      const counts = await engine.getBacklinkCounts(pageIds, policy);
       applyBacklinkBoost(results, counts, floorThreshold);
     } catch {
       // Non-fatal; preserves the existing pre-v0.29.1 contract.
@@ -614,7 +621,7 @@ export async function runPostFusionStages(
   // Salience stage (mattering, no time).
   if (metadata && opts.salience !== 'off') {
     try {
-      const scores = await engine.getSalienceScores(refs);
+      const scores = await engine.getSalienceScores(refs, policy);
       applySalienceBoost(results, scores, opts.salience, floorThreshold);
     } catch {
       // Non-fatal.
@@ -624,7 +631,7 @@ export async function runPostFusionStages(
   // Recency stage (per-prefix decay, no mattering).
   if (metadata && opts.recency !== 'off') {
     try {
-      const dates = await engine.getEffectiveDates(refs);
+      const dates = await engine.getEffectiveDates(refs, policy);
       // Resolve the effective decay map (defaults + gbrain.yml `recency:` +
       // GBRAIN_RECENCY_DECAY env) instead of the baked-in defaults. The
       // get_recent_salience SQL path already goes through resolveRecencyDecayMap()
@@ -673,6 +680,7 @@ export async function runPostFusionStages(
     try {
       const { applyGraphSignals } = await import('./graph-signals.ts');
       await applyGraphSignals(results, engine, {
+        ...policy,
         enabled: true,
         floorThreshold,
         onMeta: opts.onGraphMeta,
@@ -692,7 +700,7 @@ export async function runPostFusionStages(
   // throws isUndefinedTableError and the stage no-ops.
   if (metadata) {
     try {
-      await applyAliasResolvedBoost(results, engine);
+      await applyAliasResolvedBoost(results, engine, policy);
     } catch {
       // Non-fatal; preserves the per-stage contract.
     }
@@ -706,7 +714,7 @@ export async function runPostFusionStages(
   // facts. Fail-open per the per-stage contract: a brain with no `supersedes`
   // edges (or a pre-links schema) finds 0 rows / throws and no-ops.
   try {
-    await applySupersedeDownrank(results, engine);
+    await applySupersedeDownrank(results, engine, policy);
   } catch {
     // Non-fatal; preserves the per-stage contract.
   }
@@ -778,6 +786,7 @@ export const SUPERSEDE_PENALTY = 0.5;
 export async function applySupersedeDownrank(
   results: SearchResult[],
   engine: import('../engine.ts').BrainEngine,
+  policy?: PageReadPolicy,
 ): Promise<void> {
   if (results.length === 0) return;
   const pageIds = Array.from(
@@ -785,6 +794,10 @@ export async function applySupersedeDownrank(
   );
   if (pageIds.length === 0) return;
   if (!(await hasAnySupersedeEdges(engine))) return;
+  const params: unknown[] = [pageIds];
+  const fromFilter = pageReadFilter('pf', policy, params, !!policy);
+  const toFilter = pageReadFilter('pt', policy, params, !!policy);
+  const originFilter = policy ? `(l.origin_page_id IS NULL OR EXISTS (SELECT 1 FROM pages origin WHERE origin.id = l.origin_page_id AND ${pageReadFilter('origin', policy, params, true)}))` : 'TRUE';
   let rows: Array<{ to_page_id: number; by_slug: string }> = [];
   try {
     rows = await engine.executeRaw<{ to_page_id: number; by_slug: string }>(
@@ -795,8 +808,9 @@ export async function applySupersedeDownrank(
         WHERE l.link_type = 'supersedes'
           AND pf.deleted_at IS NULL
           AND pf.source_id = pt.source_id
-          AND l.to_page_id = ANY($1::bigint[])`,
-      [pageIds],
+          AND l.to_page_id = ANY($1::bigint[])
+          AND ${fromFilter} AND ${toFilter} AND ${originFilter}`,
+      params,
     );
   } catch {
     // Pre-links schema or SQL miss; no-op.
@@ -835,6 +849,7 @@ const ALIAS_RESOLVED_BOOST = 1.05;
 async function applyAliasResolvedBoost(
   results: SearchResult[],
   engine: import('../engine.ts').BrainEngine,
+  policy?: PageReadPolicy,
 ): Promise<void> {
   if (results.length === 0) return;
   // Build the (source_id, slug) composite list for the lookup.
@@ -851,15 +866,17 @@ async function applyAliasResolvedBoost(
   // Two-array unnest for source-scoped composite lookup.
   const sourceIds = refs.map(r => r.source_id);
   const slugs = refs.map(r => r.slug);
+  const params: unknown[] = [sourceIds, slugs];
+  const filter = pageReadFilter('p', policy, params, !!policy);
   let rows: Array<{ source_id: string; canonical_slug: string }> = [];
   try {
     rows = await engine.executeRaw<{ source_id: string; canonical_slug: string }>(
-      `SELECT DISTINCT source_id, canonical_slug
-       FROM slug_aliases
-       WHERE (source_id, canonical_slug) IN (
+      `SELECT DISTINCT a.source_id, a.canonical_slug
+       FROM slug_aliases a JOIN pages p ON p.source_id = a.source_id AND p.slug = a.canonical_slug
+       WHERE (a.source_id, a.canonical_slug) IN (
          SELECT * FROM unnest($1::text[], $2::text[])
-       )`,
-      [sourceIds, slugs],
+       ) AND ${filter}`,
+      params,
     );
   } catch {
     // Pre-v104 brain or other SQL miss; no-op.
@@ -905,7 +922,7 @@ export async function applyAliasHop(
   engine: import('../engine.ts').BrainEngine,
   results: SearchResult[],
   query: string,
-  opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean },
+  opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; requireSafeChunks?: boolean },
 ): Promise<SearchResult[]> {
   if (!query) return results;
   const qNorm = normalizeAlias(query);
@@ -913,7 +930,7 @@ export async function applyAliasHop(
 
   let aliasMap: Map<string, Array<{ slug: string; source_id: string }>>;
   try {
-    aliasMap = await engine.resolveAliases([qNorm], { sourceId: opts.sourceId, sourceIds: opts.sourceIds });
+    aliasMap = await engine.resolveAliases([qNorm], opts);
   } catch {
     return results; // pre-v110 table-missing OR transient error -> fail-open
   }
@@ -940,7 +957,7 @@ export async function applyAliasHop(
     // Absent canonical: fetch (in its OWN source) + inject at top-of-organic + epsilon.
     let page;
     try {
-      page = await engine.getPage(ref.slug, { sourceId: ref.source_id });
+      page = await engine.getPage(ref.slug, { sourceId: ref.source_id, excludePrivate: opts.excludePrivate });
     } catch {
       continue;
     }
@@ -963,7 +980,7 @@ export async function applyAliasHop(
       title: page.title,
       type: page.type,
       source_id: page.source_id ?? ref.source_id,
-      chunk_text: (page.compiled_truth ?? '').slice(0, 200),
+      chunk_text: sanitizeRemoteBody(page.compiled_truth ?? '').slice(0, 200),
       chunk_index: 0,
       chunk_id: 0,
       score: injectScore,
@@ -1355,6 +1372,7 @@ export async function hybridSearch(
     // let an untrusted caller read `visibility: private` pages through the
     // hybrid hot path.
     excludePrivate: opts?.excludePrivate,
+    requireSafeChunks: opts?.requireSafeChunks,
     // v0.36 (D11): pass the pre-validated descriptor into the engine so
     // it never has to read config. Engines normalize string-or-descriptor
     // via normalizeEngineColumn; the descriptor path is the strict one.
@@ -1501,6 +1519,11 @@ export async function hybridSearch(
   const recencyMode: 'off' | 'on' | 'strong' =
     resolveEffectiveRecency(opts, suggestions, intentWeightingOn);
   const postFusionOpts: PostFusionOpts = {
+    sourceId: opts?.sourceId,
+    sourceIds: opts?.sourceIds,
+    excludePrivate: opts?.excludePrivate,
+    requireSafeChunks: opts?.requireSafeChunks,
+    takesHoldersAllowList: opts?.takesHoldersAllowList,
     applyBacklinks: true,
     salience: salienceMode,
     recency: recencyMode,
@@ -1537,6 +1560,8 @@ export async function hybridSearch(
       // straight from pages — thread the caller's private-page gate or a
       // remote relational query bypasses the keyword/vector visibility clause.
       excludePrivate: opts?.excludePrivate,
+      requireSafeChunks: opts?.requireSafeChunks,
+      takesHoldersAllowList: opts?.takesHoldersAllowList,
       onMeta: opts?.onRelationalMeta,
     });
   }
@@ -1581,7 +1606,7 @@ export async function hybridSearch(
     // chunk-grain keyword FTS alone fails (D1).
     // issue #160: stamp unverified stubs BEFORE fusion so the compiled-truth
     // boost skips them (flag survives fusion's result spread).
-    await stampUnverifiedExtractions(engine, [...keywordResults, ...titleResults, ...relationalList]);
+    await stampUnverifiedExtractions(engine, [...keywordResults, ...titleResults, ...relationalList], opts);
     let noEmbedResults = keywordResults;
     if (relationalList.length > 0 || titleResults.length > 0) {
       const fk = opts?.rrfK ?? RRF_K;
@@ -1600,12 +1625,16 @@ export async function hybridSearch(
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
       excludePrivate: opts?.excludePrivate,
+      requireSafeChunks: opts?.requireSafeChunks,
     });
     // #1663 — structural exact-lookup tier (slug / exact-title identity).
     const noEmbedHopped = await applyExactLookupTier(engine, noEmbedPreExact, query, {
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
       titleCandidates: titleResults,
+      excludePrivate: opts?.excludePrivate,
+      requireSafeChunks: opts?.requireSafeChunks,
+      takesHoldersAllowList: opts?.takesHoldersAllowList,
       // #4480: gate tier injections on the caller's shape filters.
       type: opts?.type,
       types: opts?.types,
@@ -1628,7 +1657,7 @@ export async function hybridSearch(
     const noEmbedSliced = noEmbedPool.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the no-embedding-provider path.
     const { results: noEmbedBudgeted, meta: noEmbedBudgetMeta } = enforceTokenBudget(noEmbedSliced, resolvedMode.tokenBudget);
-    await stampContentFlags(engine, noEmbedBudgeted);
+    await stampContentFlags(engine, noEmbedBudgeted, opts);
     lastResultsCount = noEmbedBudgeted.length;
     lastRank1Score = noEmbedBudgeted[0] ? (noEmbedBudgeted[0].base_score ?? noEmbedBudgeted[0].score) : undefined;
     // WP2/T3 — no silent bypass: the keyword-only-config branch names why
@@ -1995,7 +2024,7 @@ export async function hybridSearch(
     // here too (same rationale as the no-embedding-provider path — D1).
     // issue #160: stamp unverified stubs BEFORE fusion (see the
     // no-embedding-provider path for rationale).
-    await stampUnverifiedExtractions(engine, [...keywordResults, ...titleResults, ...relationalList]);
+    await stampUnverifiedExtractions(engine, [...keywordResults, ...titleResults, ...relationalList], opts);
     let fallbackResults = keywordResults;
     if (relationalList.length > 0 || titleResults.length > 0) {
       const fk = opts?.rrfK ?? RRF_K;
@@ -2012,12 +2041,16 @@ export async function hybridSearch(
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
       excludePrivate: opts?.excludePrivate,
+      requireSafeChunks: opts?.requireSafeChunks,
     });
     // #1663 — structural exact-lookup tier (slug / exact-title identity).
     const kwHopped = await applyExactLookupTier(engine, kwPreExact, query, {
       sourceId: opts?.sourceId,
       sourceIds: opts?.sourceIds,
       titleCandidates: titleResults,
+      excludePrivate: opts?.excludePrivate,
+      requireSafeChunks: opts?.requireSafeChunks,
+      takesHoldersAllowList: opts?.takesHoldersAllowList,
       // #4480: gate tier injections on the caller's shape filters.
       type: opts?.type,
       types: opts?.types,
@@ -2027,7 +2060,7 @@ export async function hybridSearch(
     const kwSliced = kwHopped.slice(offset, offset + limit);
     // v0.32.3 search-lite: budget enforcement on the keyword-fallback path too.
     const { results: kwBudgeted, meta: kwBudgetMeta } = enforceTokenBudget(kwSliced, resolvedMode.tokenBudget);
-    await stampContentFlags(engine, kwBudgeted);
+    await stampContentFlags(engine, kwBudgeted, opts);
     lastResultsCount = kwBudgeted.length;
     lastRank1Score = kwBudgeted[0] ? (kwBudgeted[0].base_score ?? kwBudgeted[0].score) : undefined;
     // WP2/T3 — the embed/vector failure that emptied vectorArms already
@@ -2145,7 +2178,7 @@ export async function hybridSearch(
 
   // issue #160: stamp unverified auto-extracted stubs across ALL candidate
   // arms BEFORE fusion so the compiled-truth authority boost skips them.
-  await stampUnverifiedExtractions(engine, allLists.flatMap((l) => l.list));
+  await stampUnverifiedExtractions(engine, allLists.flatMap((l) => l.list), opts);
 
   let fused = rrfFusionWeighted(allLists, shouldBoostCompiledTruth(detail));
 
@@ -2193,7 +2226,9 @@ export async function hybridSearch(
   // structural neighbors from the same file/class are the whole point
   // of two-pass; clipping them at 2/page defeats A2 (codex F5).
   const walkDepth = Math.min(opts?.walkDepth ?? 0, 2);
-  const needsExpansion = walkDepth > 0 || Boolean(opts?.nearSymbol);
+  // The optional code walk's raw graph hydration has no row-level read policy.
+  // Keep it suspended for untrusted retrieval until that boundary is supported.
+  const needsExpansion = !requiresSafeChunks(opts) && (walkDepth > 0 || Boolean(opts?.nearSymbol));
   let dedupOpts = opts?.dedupOpts;
 
   if (needsExpansion) {
@@ -2301,6 +2336,7 @@ export async function hybridSearch(
     sourceId: opts?.sourceId,
     sourceIds: opts?.sourceIds,
     excludePrivate: opts?.excludePrivate,
+    requireSafeChunks: opts?.requireSafeChunks,
   });
 
   // #1663 — structural exact-lookup tier: a query that IS a page identity
@@ -2313,6 +2349,9 @@ export async function hybridSearch(
     sourceId: opts?.sourceId,
     sourceIds: opts?.sourceIds,
     titleCandidates: titleResults,
+    excludePrivate: opts?.excludePrivate,
+    requireSafeChunks: opts?.requireSafeChunks,
+    takesHoldersAllowList: opts?.takesHoldersAllowList,
     // #4480: gate tier injections on the caller's shape filters.
     type: opts?.type,
     types: opts?.types,
@@ -2420,7 +2459,7 @@ export async function hybridSearch(
   // hybridSearch enforces it too so eval-replay + eval-longmemeval see
   // the same budget behavior as the production query op.
   const { results: budgeted, meta: budgetMeta } = enforceTokenBudget(sliced, resolvedMode.tokenBudget);
-  await stampContentFlags(engine, budgeted);
+  await stampContentFlags(engine, budgeted, opts);
   lastResultsCount = budgeted.length;
   lastRank1Score = budgeted[0] ? (budgeted[0].base_score ?? budgeted[0].score) : undefined;
   stampBudgetStage(degraded, budgetMeta);
@@ -2638,12 +2677,7 @@ export async function hybridSearchCached(
     // (and thus results), so it must change the key immediately instead of
     // serving old-classification rows for the rest of the cache TTL.
     intentPatterns: intentStateForCache.fingerprint,
-    // #4352 follow-up — fold the private-visibility posture into the key
-    // (xp=, v=23) for BOTH the lookup and the write below (they share this
-    // one hash), instead of the original wholesale skipCache bypass. A
-    // remote-default (excludePrivate=true) caller now caches normally, on
-    // rows that can never be served to (or written by) a trusted
-    // private-included call.
+    // Retained storage-key shape; semantic response reuse is disabled below.
     excludePrivate: opts?.excludePrivate === true,
     // v=27 (E5b) — the resolved gate + this query's intent class, classified
     // by the SAME pattern-aware banks bare hybridSearch resolves (above).
@@ -2710,13 +2744,10 @@ export async function hybridSearchCached(
   // array's start and returns nothing — so `> 0` let those requests
   // read/write the cache anyway.
   const pagedRequest = (opts?.offset ?? 0) !== 0;
-  // #4352 follow-up — excludePrivate no longer skips the cache: the posture
-  // is folded into knobsHash (xp=), so a private-included (trusted)
-  // write can never serve a private-excluding lookup and vice versa. The
-  // original wholesale skip disabled the semantic cache for every remote MCP
-  // caller (excludePrivate=true is their default) — exactly the
-  // highest-volume beneficiaries of the ~50% cache savings.
+  // Hard availability gate: no persisted result is read or written until
+  // every response dependency can be authorized at reuse time.
   const skipCache =
+    !semanticResultCacheAvailable() ||
     !cache.isEnabled() ||
     (opts?.walkDepth ?? 0) > 0 ||
     Boolean(opts?.nearSymbol) ||

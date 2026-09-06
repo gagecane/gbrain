@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.48.3.0] - 2026-09-06
+## [0.48.4.0] - 2026-09-06
 
 **The ranker wave: search stops burying graph answers and concept pages, `gbrain eval longmemeval` becomes the like-for-like receipt producer, and every ranking default that moved carries a pre-registered receipt.**
 
@@ -176,7 +176,7 @@ is in `docs/eval-bench.md`.
   pool depth or reranker depth. No temporal knob landed; the reranker is the
   lever that moves this class.
 
-### To take advantage of v0.48.3.0
+### To take advantage of v0.48.4.0
 
 `gbrain upgrade` should do this automatically. If it didn't:
 
@@ -264,6 +264,85 @@ is in `docs/eval-bench.md`.
 - The two eval scaffolds that reported `ok: true` for work never run
   (`eval-markdown-greenfield`, `eval-extract-atoms`) are deleted; the
   remaining scaffold returns an honest not-implemented envelope.
+
+## [0.48.3.0] - 2026-09-06
+
+**Your brain applies consistent access rules, and verification must run before it reports success.**
+
+Agents receive material allowed for their current connection when they read,
+search, or follow relationships through your brain. This release also makes
+remote calls stop when cancelled and keeps application errors intact so your
+agent can explain the actual problem. Existing installations receive the changes
+on upgrade, with no database schema migration or new service to configure.
+
+Repeated searches now perform fresh retrieval,
+so they can take longer and use more provider tokens. Stored contradiction
+reports are available only to trusted local callers searching without a source
+filter. Other callers receive an availability note. Your stored cache records
+remain available for maintenance, but changing a cache setting cannot turn
+semantic result caching back on in this release.
+
+Existing search chunks must be rebuilt with the corrected indexer before
+chunk-based remote retrieval resumes. Direct page reads remain available under
+the connection's access rules. Remote importance scores reflect permitted active
+takes, so they can differ from unrestricted local scores. The upgrade guide
+explains these changes and the existing reindex options. Code definition,
+reference, caller/callee and flow/blast tools are temporarily available only to
+trusted local callers. Remote search also omits optional code-graph expansion.
+
+### What to expect
+
+| Action | Result after upgrading |
+|---|---|
+| Repeat a search | Fresh retrieval; semantic result caching reports disabled |
+| Request a stored contradiction report remotely | A note explaining its temporary availability |
+| Cancel a remote request | Discovery, connection and tool work stop with the request |
+| Rebuild existing search chunks | Remote chunk retrieval resumes after a successful rebuild |
+| Use code-inspection tools remotely | A temporary availability message; trusted local tools still work |
+| Run the full local CI command | Required serial, slow, unit and database tests execute |
+
+## To take advantage of v0.48.3.0
+
+**Say to your agent:** *"upgrade gbrain and verify my brain's search configuration"*.
+
+```bash
+gbrain upgrade
+gbrain doctor
+gbrain search modes
+gbrain cache stats
+```
+
+Agents should read `skills/migrations/v0.48.3.0.md` for the verification steps and
+temporary behavior changes and optional chunk-rebuild steps. No provider-key
+changes are required. If health checks fail, follow the printed remediation
+before retrying.
+
+### Itemized changes
+
+#### Fixed
+
+- Apply consistent access rules to content, history, relationships and search
+  metadata across both storage engines.
+- Keep protected body sections consistent across agent-facing reads and chunk
+  creation, with bounded processing time for repeated sections.
+- Refresh remote authentication only for a transport authentication failure,
+  and preserve application errors and cancellation throughout the request.
+
+#### Changed
+
+- Temporarily disable semantic result-cache reads and writes while keeping
+  ordinary search and cache maintenance available.
+- Limit stored contradiction reports to trusted, unscoped local callers.
+
+#### For contributors
+
+- Remove successful-test result caches and require successful execution of the
+  applicable CI lanes. Coverage percentages remain advisory.
+- Include serial, slow and transaction-mode PgBouncer checks in local CI;
+  preserve failures and complete shard logs.
+- Isolate routing fixtures from inherited provider configuration and local
+  environment files, with bounded diagnostics that redact credentials.
+- Keep frozen dependency installation and scan both root and admin manifests.
 
 ## [0.48.2.0] - 2026-09-02
 

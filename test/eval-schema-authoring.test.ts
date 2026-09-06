@@ -2,7 +2,7 @@
 // Pins the pass-criterion codex finding #9 demanded: filing accuracy
 // delta is the gate, NOT manifest correctness.
 //
-// E4 (v0.48.3.0) added the runner contract: until the fixture-brain harness
+// E4 (v0.48.4.0) added the runner contract: until the fixture-brain harness
 // lands, running the eval must read as an honest not-implemented verdict
 // (#4198 shape), never as a pass or a data-bearing inconclusive.
 

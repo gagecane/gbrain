@@ -542,7 +542,7 @@ Real numbers from the published benchmark snapshot (2026-05-23, v0.40.6.0, measu
 - **Ingest speed:** about 22 seconds for a small test corpus of 164 pages on the host machine. For a 10K-page corpus, expect about 20 minutes the first time, then most syncs are incremental and finish in seconds.
 - **Query latency:** about 122 ms median for a `gbrain search`. For comparison, the same query through GBrain with OpenAI takes about 282 ms.
 - **Synthesized-answer latency:** a few seconds, dominated by the Anthropic API.
-- **Retrieval quality:** on the public LongMemEval benchmark (S split, cleaned revision, 470 scored questions), GBrain measures 95.53% session-level `recall_all@5` on its release default path (`voyage:rerank-2.5` on, autocut off) and 93.40% with the reranker off: every gold session inside the top 5 retrieved sessions, retrieval only, no reader model (measured 2026-09-06 at v0.48.3.0 by `gbrain eval longmemeval`; receipts in the sibling gbrain-evals repo and `docs/eval-bench.md`).
+- **Retrieval quality:** on the public LongMemEval benchmark (S split, cleaned revision, 470 scored questions), GBrain measures 95.53% session-level `recall_all@5` on its release default path (`voyage:rerank-2.5` on, autocut off) and 93.40% with the reranker off: every gold session inside the top 5 retrieved sessions, retrieval only, no reader model (measured 2026-09-06 at v0.48.4.0 by `gbrain eval longmemeval`; receipts in the sibling gbrain-evals repo and `docs/eval-bench.md`).
 
 Full methodology and per-run receipt JSONs live in [the gbrain-evals repo](https://github.com/garrytan/gbrain-evals/blob/main/docs/benchmarks/2026-05-23-v0.40.6.0-snapshot.md).
 

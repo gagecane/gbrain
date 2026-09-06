@@ -151,7 +151,7 @@ describe('hybridSearch — reranker disabled (pass-through)', () => {
 });
 
 describe('hybridSearchCached — email metadata through vector-first fusion', () => {
-  test('fresh cache miss preserves metadata through vector-first RRF duplicate handling', async () => {
+  test('fresh uncached retrieval preserves metadata through vector-first RRF duplicate handling', async () => {
     await engine.executeRaw(`DELETE FROM query_cache`);
     let cacheStatus: string | undefined;
     const out = await hybridSearchCached(engine, 'vector first duplicate metadata evidence', {
@@ -162,13 +162,14 @@ describe('hybridSearchCached — email metadata through vector-first fusion', ()
       onMeta: (meta) => { cacheStatus = meta.cache?.status; },
     });
 
-    expect(cacheStatus).toBe('miss');
+    expect(cacheStatus).toBe('disabled');
     const matches = out.filter(r => r.slug === 'mail/vector-first');
     expect(matches).toHaveLength(1);
     expect(matches[0].message_id).toBe('<vector-first@example.com>');
     expect(matches[0].thread_id).toBe('thread-vector-first');
     expect(matches[0].source_subject).toBe('Vector-first exact subject');
     await awaitPendingSearchCacheWrites();
+    expect(await engine.executeRaw('SELECT id FROM query_cache')).toHaveLength(0);
   });
 });
 

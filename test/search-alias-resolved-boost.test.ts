@@ -34,24 +34,23 @@ const noopPostFusionOpts: PostFusionOpts = {
   graphSignalsEnabled: false,
 };
 
+async function candidate(slug: string, sourceId = 'default'): Promise<SearchResult> {
+  const page = await engine.putPage(slug, {
+    title: slug, type: 'concept', compiled_truth: 'Synthetic alias fixture',
+  }, { sourceId });
+  return {
+    slug, source_id: sourceId, score: 1, chunk_id: page.id, page_id: page.id,
+    chunk_text: '', chunk_index: 0, title: slug, type: 'concept', slug_lower: slug,
+  } as unknown as SearchResult;
+}
+
 describe('alias_resolved boost stage', () => {
   it('applies 1.05x multiplier to pages that are canonicals of aliases', async () => {
-    // Insert an alias pointing at canonical-page
+    // A canonical alias must point at an actual page in the same source.
+    const results = [await candidate('canonical-page'), await candidate('plain-page')];
     await engine.executeRaw(
       `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug) VALUES ('default', 'old-name', 'canonical-page')`,
     );
-    const results: SearchResult[] = [
-      {
-        slug: 'canonical-page', source_id: 'default', score: 1.0,
-        chunk_id: 1, page_id: 1, chunk_text: '', chunk_index: 0,
-        title: 'Canonical', type: 'concept' as never, slug_lower: 'canonical-page',
-      } as unknown as SearchResult,
-      {
-        slug: 'plain-page', source_id: 'default', score: 1.0,
-        chunk_id: 2, page_id: 2, chunk_text: '', chunk_index: 0,
-        title: 'Plain', type: 'concept' as never, slug_lower: 'plain-page',
-      } as unknown as SearchResult,
-    ];
     await runPostFusionStages(engine, results, noopPostFusionOpts);
     // canonical-page gets 1.05x boost
     expect(results[0].score).toBeCloseTo(1.05, 5);
@@ -62,11 +61,7 @@ describe('alias_resolved boost stage', () => {
   });
 
   it('does not boost when no aliases exist', async () => {
-    const results: SearchResult[] = [{
-      slug: 'plain', source_id: 'default', score: 1.0,
-      chunk_id: 1, page_id: 1, chunk_text: '', chunk_index: 0,
-      title: 'p', type: 'concept' as never, slug_lower: 'plain',
-    } as unknown as SearchResult];
+    const results = [await candidate('plain')];
     await runPostFusionStages(engine, results, noopPostFusionOpts);
     expect(results[0].score).toBeCloseTo(1.0, 5);
     expect(results[0].alias_resolved_boost).toBeUndefined();
@@ -74,17 +69,14 @@ describe('alias_resolved boost stage', () => {
 
   it('is source-scoped (F9): alias in source A does not boost in source B', async () => {
     await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('alt', 'alt') ON CONFLICT DO NOTHING`);
+    const results = [await candidate('shared'), await candidate('shared', 'alt')];
     await engine.executeRaw(
       `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug) VALUES ('alt', 'old', 'shared')`,
     );
-    // Same slug, different source — should NOT be boosted (alias is in 'alt')
-    const results: SearchResult[] = [{
-      slug: 'shared', source_id: 'default', score: 1.0,
-      chunk_id: 1, page_id: 1, chunk_text: '', chunk_index: 0,
-      title: 's', type: 'concept' as never, slug_lower: 'shared',
-    } as unknown as SearchResult];
+    // Both namesakes exist, but only the alias's exact source gets the boost.
     await runPostFusionStages(engine, results, noopPostFusionOpts);
     expect(results[0].alias_resolved_boost).toBeUndefined();
+    expect(results[1].alias_resolved_boost).toBe(1.05);
   });
 });
 

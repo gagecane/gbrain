@@ -6,6 +6,7 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
+import { semanticResultCacheAvailable } from './query-cache.ts';
 import {
   MODE_BUNDLES,
   SEARCH_MODE_CONFIG_KEYS,
@@ -167,6 +168,15 @@ export async function buildModesReport(engine: BrainEngine): Promise<SearchModes
       source: a.source,
       source_detail: a.source_detail,
       description: KNOB_DESCRIPTIONS[k],
+    };
+  }
+
+  if (!semanticResultCacheAvailable()) {
+    attributions.cache_enabled = {
+      ...attributions.cache_enabled,
+      value: false,
+      source: 'availability',
+      source_detail: 'Semantic result caching is temporarily disabled; configured settings are retained.',
     };
   }
 

@@ -108,6 +108,14 @@ describe('#4604 buildModesReport — full-bundle knob coverage', () => {
     expect(report.resolved.reranker_enabled.source).toBe('override');
   });
 
+  test('effective semantic caching stays disabled despite an enabling override', async () => {
+    const report = await buildModesReport(stubEngine({ 'search.cache.enabled': 'true' }));
+    expect(report.resolved.cache_enabled.value).toBe(false);
+    expect(report.resolved.cache_enabled.source).toBe('availability');
+    expect(report.resolved.cache_enabled.source_detail).toContain('temporarily disabled');
+    expect(report.bundles.balanced.cache_enabled).toBe(true); // retained configuration
+  });
+
   test('per_call_note labels the report as brain-level resolution only', async () => {
     const report = await buildModesReport(stubEngine());
     expect(report.per_call_note).toBe(MODES_REPORT_PER_CALL_NOTE);

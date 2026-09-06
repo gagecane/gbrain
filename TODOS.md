@@ -1,6 +1,6 @@
 # TODOS
 
-## Ranker wave follow-ups (filed 2026-09-06, v0.48.3.0 wave; plan: ~/.claude/plans/do-a-gbrain-evals-fix-snug-starlight.md)
+## Ranker wave follow-ups (filed 2026-09-06, v0.48.4.0 wave; plan: ~/.claude/plans/do-a-gbrain-evals-fix-snug-starlight.md)
 
 - [ ] **P2 — session-aware autocut (the next pre-registered mechanism for `search.autocut`).**
   **What:** `applyAutocut` cuts at the largest rerank-score cliff with
@@ -75,7 +75,7 @@
   `src/eval/longmemeval/`; a new lane must not fork the judge, bootstrap, or
   embed cache. Frozen-corpus rules apply: no tuning on the confirmation
   slice; decisions on held-out questions. **Effort:** L. **Priority:** P3.
-  **Depends on:** the v0.48.3.0 wave landing.
+  **Depends on:** the v0.48.4.0 wave landing.
 - [ ] **P3 — `eval run-all` wires longmemeval via `--record`.**
   **What:** a longmemeval arm in `src/commands/eval-run-all.ts` that drives
   `gbrain eval longmemeval <dataset> --retrieval-only --record` (embed cache
@@ -412,7 +412,7 @@ deferred M-effort issues above are NOT repeated here.
   — the wave's live calibration showed rubric v2 alone lifts the class, so
   don't add spend until production distributions disagree. **Where:**
   runTriagePass processOne + triage-rescue.ts.
-- [x] **P2 — E4: wire-or-delete the three undispatchable eval scaffolds.** **Completed: v0.48.3.0 (2026-09-06)** — deleted `src/commands/eval-markdown-greenfield.ts` + `eval-extract-atoms.ts` (the two ok:true/`not_yet_implemented` envelopes; referenced only by their scaffold test, which now pins synthesize-concepts alone); `eval-schema-authoring.ts` kept for its real, unit-tested `aggregateVerdict`/`parseArgs` and its runner converted to the #4198 shape (ok:false, status `not_implemented`, `runEvalSchemaAuthoringCli` exits 1; pinned in `test/eval-schema-authoring.test.ts`). Deliberately NO cli.ts/eval.ts dispatch for schema-authoring yet — a subcommand appears when it evaluates something; that wiring rides with the T16 hermetic-harness follow-through below.
+- [x] **P2 — E4: wire-or-delete the three undispatchable eval scaffolds.** **Completed: v0.48.4.0 (2026-09-06)** — deleted `src/commands/eval-markdown-greenfield.ts` + `eval-extract-atoms.ts` (the two ok:true/`not_yet_implemented` envelopes; referenced only by their scaffold test, which now pins synthesize-concepts alone); `eval-schema-authoring.ts` kept for its real, unit-tested `aggregateVerdict`/`parseArgs` and its runner converted to the #4198 shape (ok:false, status `not_implemented`, `runEvalSchemaAuthoringCli` exits 1; pinned in `test/eval-schema-authoring.test.ts`). Deliberately NO cli.ts/eval.ts dispatch for schema-authoring yet — a subcommand appears when it evaluates something; that wiring rides with the T16 hermetic-harness follow-through below.
   **What:** src/commands/eval-markdown-greenfield.ts, eval-extract-atoms.ts,
   eval-schema-authoring.ts are registered nowhere in eval.ts/cli.ts dispatch;
   the first two return ok:true with status not_yet_implemented — the exact
@@ -1126,7 +1126,7 @@ deferred M-effort issues above are NOT repeated here.
   config-overridable today. The reranker default flip (zerank-2 →
   voyage:rerank-2.5) shipped in v0.48.2.0 WITHOUT re-tuning autocut_min_top: the
   re-tune was rule R2 of the ranker wave's pre-registered rerank A/B. **R2
-  DECIDED (v0.48.3.0, 2026-09-06):** the shipped default (reranker on, autocut
+  DECIDED (v0.48.4.0, 2026-09-06):** the shipped default (reranker on, autocut
   0.35) scored 379/470 strict `recall_all@5` vs 449/470 with autocut off (paired
   +0/−68 on the 430-question decision set); the replay from the captured
   post-rerank pool (live decisions reproduced 500/500) found no floor in
@@ -1229,7 +1229,7 @@ deferred M-effort issues above are NOT repeated here.
   concept lane); (c) if trajectory: widen `extractCandidateEntities` coverage on
   event-shaped (non-person) anchors. Do NOT rebuild the date-proximity boost without
   new evidence — this entry is the receipt for why it doesn't exist.
-  **Hypothesis (a) answered (v0.48.3.0 ranker wave, Phase B, 2026-09-06, receipt
+  **Hypothesis (a) answered (v0.48.4.0 ranker wave, Phase B, 2026-09-06, receipt
   `A1.halfA.diag.md` in the wave's receipts):** on the half-A slice of the 430-question
   decision set, every missed gold session of a temporal-reasoning question sits in the
   vector arm's top 15 and its FUSED rank equals its vector rank (6–15): the loss is the
@@ -1652,11 +1652,10 @@ deferred M-effort issues above are NOT repeated here.
 
 - [ ] **P1 — Graduate the diff-coverage gate to blocking (time-boxed 2 weeks from merge).**
   **What:** flip `COVERAGE_GATE_ENFORCE` to `'1'` in test.yml's coverage-report job, add
-  coverage-report to test-status's required-success set and cache-write's needs, and replace
+  coverage-report to test-status's required-success set, and replace
   the provisional `scripts/coverage-baseline.json` corpus sections with CI-derived values via
   `scripts/update-coverage-baseline.ts --promote`. **Criteria:** 10 consecutive green
-  coverage-report runs on PRs (master runs are structurally cache-skipped — a squash-merged
-  tree equals its green PR tree, so the ci-pass marker hits; never count master runs) plus 3
+  coverage-report runs on PRs (count PR receipts, not master runs) plus 3
   green nightly fullCorpus merges and zero merge-infrastructure failures. **Why:** the 80%
   diff gate is built and reporting on every PR; blocking is a one-line flip once the
   measurement machinery has receipts. Review `scripts/coverage-gate-exemptions.txt` against
@@ -1795,7 +1794,7 @@ deferred M-effort issues above are NOT repeated here.
       ships; tokenmax stays ON. Keyless brains fail open per search
       (`no_key`, one audit row per process, no stderr) with doctor/`search
       modes` naming the fix.
-      R1 DECIDED 2026-09-06 (v0.48.3.0 ranker wave): NamedThingBench core
+      R1 DECIDED 2026-09-06 (v0.48.4.0 ranker wave): NamedThingBench core
       0 losses; the relational fixture collapsed with the reranker ON (hit@1
       21→3 of 39) and is fixed by search.relational_rerank_pin=3 (0 losses
       with the pin, incl. autocut on); balanced reranker stays ON. Phase E
@@ -8691,33 +8690,27 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
   read leaks on its first runs; the write side has had zero equivalent
   sweep pressure. Effort: M. Depends on: nothing (read-side sweep already
   landed as the pattern to copy).
-- [ ] **P2 — source-scope + row-grain hardening for the salience/anomaly/expert
-  arms.** Four classes surfaced by the read-side sweep's review and deferred
-  from the leak PR because each is a family-wide semantics change: (a)
-  `get_recent_salience`/`find_anomalies` never thread `sourceScopeOpts(ctx)`
-  into the engine reads (pre-existing v0.34.1 source-isolation class — a
-  source-bound remote client sees every source's world rows); (b) the whole
-  `findPrivateOnlySlugs` family is slug-grain, so a slug world-in-source-A /
-  private-in-source-B serves the PRIVATE row's own title through row-grain
-  arms (rows carry source_id — a composite-key filter fixes it, but must land
-  family-wide or semantics diverge across ops); (c) the private post-filters
-  run AFTER the engine's LIMIT, so remote callers can get fewer than `limit`
-  rows while world rows exist below the cutoff (push the
-  `privatePagesFilterFragment` predicate into the engine reads, or over-fetch);
-  (d) the two unscoped private-visibility probes are slug-only queries
-  with no slug-leading index (`pages_source_slug_key` leads on source_id) —
-  add a `pages(slug)` btree index when (a)-(c) land; (e) `find_anomalies`
-  baselines (`baseline_mean`/`baseline_stddev`) are computed private-inclusive
-  in both engines, so a mixed cohort's baseline discloses aggregate private
-  activity volume AND a genuinely-anomalous world spike can be suppressed when
-  concurrent private activity inflated the baseline — world-only cohort
-  aggregation belongs in the same engine pass as (a). Effort: M-L. Depends on:
-  nothing, but coordinate with the P3 chokepoint below rather than duplicating.
+- [x] **P2 — source-scope + row-grain hardening for salience/anomaly/experts** — completed v0.48.3.0.
+  Corrective-release implementation uses the shared concrete-page SQL policy
+  before ranking, limits and baseline aggregation, with final expert admission.
+  Slug-only authorization is removed from these data-bearing reads; existing
+  source/ID indexes support batched queries, so no migration is needed.
+- [ ] **P1 — restore semantic results and remote contradiction reports only with
+  complete provenance.** Response dependencies must include metadata, holder
+  policy, query context and judgment-cache inputs/keys. Current containment
+  bypasses semantic result lookup/write and restricts stored reports to trusted
+  unscoped local reads. Pair-only validation is insufficient. Own reviewed plan.
+- [ ] **P1 — restore remote code inspection and structural expansion with full
+  read-policy enforcement.** Authorize concrete source/page/chunk rows and every
+  recursive contributor, including traversal-cache dependencies, before
+  restoring remote definition/reference/caller/callee/flow/blast operations and
+  optional search expansion. The v0.48.3.0 restriction preserves trusted local
+  commands. Own reviewed plan; no source-grant or chunk-rebuild override.
 - [ ] **P3 — runtime chokepoint for world-only filtering.** Privacy is
-  enforced per-arm/per-column at N call sites (get_page/fetch strip, delta
-  page arm, find_orphans/get_recent_salience/find_anomalies post-filters,
-  context_pack/delta include_private gating); each new remote surface leaks
-  until someone notices — the class has now recurred five times. Move the
+  enforced through shared body sanitizers and SQL read policy, but each read
+  path must still thread its caller policy (including analytics and
+  context_pack/delta include_private gating). New surfaces can omit that
+  policy. Move the
   world-only filter to a single dispatch-layer interceptor (or an
   engine-level read-scope wrapper) so new ops are world-only BY DEFAULT.
   High blast radius: touches every read op; do NOT attempt until both
@@ -8946,7 +8939,7 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
   `src/core/search/hybrid.ts` fusion assembly (`allLists`),
   `expansion.ts`. Receipt: gbrain-evals
   `lme-phase6-8bb33cac-k5.{ndjson,json}`. **Effort:** M.
-  **DECIDED (v0.48.3.0 ranker wave, 2026-09-06):** budget-normalized weighted
+  **DECIDED (v0.48.4.0 ranker wave, 2026-09-06):** budget-normalized weighted
   RRF landed as `search.expansion_variant_budget` (`fusion-lists.ts`; null =
   legacy, byte-identical). Replaying the SAME recorded Haiku variants, strict
   recall_all@5 climbs monotonically as the budget shrinks (255/470 legacy →
@@ -9098,6 +9091,6 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
   only above a margin floor; (c) an R1-style paired A/B on a brain with
   extractor edges (`scripts/r1-namedthing-rerank-ab.ts --relational`
   generalized to a real source) before raising the default above 3.
-  **Context:** filed from the ranker wave R1 fix (v0.48.3.0); the per-brain
+  **Context:** filed from the ranker wave R1 fix (v0.48.4.0); the per-brain
   opt-out is `gbrain config set search.relational_rerank_pin off`. **Effort:** M.
 
