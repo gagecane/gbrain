@@ -52,17 +52,24 @@ describe('NamedThingBench corpus module', () => {
     }
   });
 
-  test('seedNamedThingCorpus refuses an embedder that returns the wrong count', async () => {
-    const engine = new PGLiteEngine();
+});
+
+describe('seedNamedThingCorpus embedder contract', () => {
+  // Own engine in beforeAll (test-isolation rule R3): the rejected seed may
+  // have written pages before throwing, so it must not share the OFF-arm brain.
+  let contractEngine: PGLiteEngine;
+  beforeAll(async () => {
     __setEmbedTransportForTests(() => { throw new Error('stub'); });
-    try {
-      await engine.connect({});
-      await engine.initSchema();
-      await expect(seedNamedThingCorpus(engine, { embed: async () => [new Float32Array(4)] })).rejects.toThrow(/returned 1 vector/);
-    } finally {
-      __setEmbedTransportForTests(null);
-      await engine.disconnect();
-    }
+    contractEngine = new PGLiteEngine();
+    await contractEngine.connect({});
+    await contractEngine.initSchema();
+  });
+  afterAll(async () => {
+    __setEmbedTransportForTests(null);
+    await contractEngine.disconnect();
+  });
+  test('refuses an embedder that returns the wrong count', async () => {
+    await expect(seedNamedThingCorpus(contractEngine, { embed: async () => [new Float32Array(4)] })).rejects.toThrow(/returned 1 vector/);
   });
 });
 
