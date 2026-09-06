@@ -27,8 +27,10 @@ import { validateCommandFlags } from '../src/cli.ts';
  * the rest of eval-longmemeval.ts parseArgs. Every entry MUST be a literal in
  * src/commands/eval-longmemeval.ts (the generator scans the command module +
  * one import level) — a flag that only ever lived in a helper's prose (the
- * pre-fix `--judge-model` / `--parity-baseline`, which reached the row via
- * gateway.ts's deps) is exactly the phantom class this file guards against.
+ * pre-fix `--parity-baseline`, which reached the row via gateway.ts's deps)
+ * is exactly the phantom class this file guards against. `--judge-model` was
+ * once such a phantom; since the Phase D judge lane it is a REAL longmemeval
+ * flag (LME_FLAGS) and is asserted present, not absent.
  */
 const LONGMEMEVAL_FLAGS = [
   '--retrieval-only',
@@ -46,6 +48,13 @@ const LONGMEMEVAL_FLAGS = [
   '--limit',
   '--top-k',
   '--mode',
+  // Phase D judged-answer lane.
+  '--judge',
+  '--judge-model',
+  '--max-usd',
+  '--yes',
+  '--judge-concurrency',
+  '--allow-incomplete-judgments',
 ];
 
 /** Real `gbrain agent register` flags (src/commands/agent-register.ts parseArgs / help). */
@@ -150,6 +159,10 @@ describe('committed registry — eval row attribution (acceptance)', () => {
       '--by-type-floor', '0.5', '--capture-pool', '--autocut', 'off', '--reranker', 'off',
       '--mode', 'tokenmax', '--top-k', '5', '--limit', '10',
     ])).toBeNull();
+    expect(validateCommandFlags('eval', [
+      'longmemeval', 'f.jsonl', '--no-trajectory', '--judge', '--judge-model', 'openai:gpt-4o',
+      '--max-usd', '5', '--yes', '--judge-concurrency', '2', '--allow-incomplete-judgments',
+    ])).toBeNull();
   });
 
   test('the rows that used to absorb bypass text no longer carry it (regression pins)', () => {
@@ -229,7 +242,8 @@ describe('block-level module scan — only ./commands/*.ts handlers are command 
     expect(CLI_FLAG_REGISTRY.think).not.toContain('--symbol-kind');
     expect(CLI_FLAG_REGISTRY.doctor).not.toContain('--oauth-client-secret');
     expect(CLI_FLAG_REGISTRY.doctor).not.toContain('--grant-types');
-    expect(CLI_FLAG_REGISTRY.eval).not.toContain('--judge-model');
     expect(CLI_FLAG_REGISTRY.eval).not.toContain('--embeddings');
+    // --judge-model is now a real LME_FLAGS entry (Phase D), no longer a phantom.
+    expect(CLI_FLAG_REGISTRY.eval).toContain('--judge-model');
   });
 });

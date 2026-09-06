@@ -224,7 +224,7 @@ export const METRIC_GLOSSARY: Readonly<Record<string, Readonly<MetricGlossEntry>
   }),
   'qa_accuracy': Object.freeze({
     industry_term: 'Judged QA accuracy (LongMemEval, LLM-as-judge)',
-    eli10: 'Of the questions whose generated answer was judged, what fraction did the judge model mark correct against the gold answer (official LongMemEval prompts)? Judge errors (timeouts, refusals, malformed verdicts) are excluded from the denominator and counted separately — they are not wrong answers.',
+    eli10: 'Of all questions in the run, what fraction did the judge model mark correct against the gold answer (official LongMemEval prompts)? The headline scores every question the judge could not grade (timeouts, refusals, malformed verdicts, budget skips) as INCORRECT, so it is never more lenient than the official scorer; the companion accuracy_excluding_errors drops those rows from the denominator and the judge_errors count says how many there were.',
     range: '0..1, higher is better. Only comparable across runs with the same reader model, judge model, prompt version and dataset revision.',
   }),
   'mean_returned_results': Object.freeze({

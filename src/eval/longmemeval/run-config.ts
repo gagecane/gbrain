@@ -21,6 +21,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import type { SearchMode } from '../../core/search/mode.ts';
+import type { LongMemEvalQuestion } from './adapter.ts';
 
 /** The pins that change fused results for one `gbrain eval longmemeval` run. */
 export interface RetrievalPins {
@@ -181,4 +182,38 @@ export function buildRunConfig(input: RunConfigInput): Record<string, unknown> {
     excluded_abstention: input.excluded_abstention,
     errors: input.errors,
   };
+}
+
+/** The `question_date` field is optional on disk; the reader emits `Current Date:` only when present. */
+export type DatasetQuestion = LongMemEvalQuestion & { question_date?: string };
+
+/**
+ * Load a LongMemEval dataset (JSONL, or a JSON array) and its sha256 (the
+ * receipt's dataset pin). Throws with a download hint when missing and with
+ * the line number on a parse failure — the harness maps both to exit 1.
+ */
+export function loadDataset(datasetPath: string, downloadUrl: string): { questions: DatasetQuestion[]; sha256: string } {
+  if (!existsSync(datasetPath)) {
+    throw new Error(`dataset not found: ${datasetPath}\nDownload from ${downloadUrl}`);
+  }
+  const bytes = readFileSync(datasetPath);
+  const sha256 = sha256Hex(bytes);
+  const raw = bytes.toString('utf8');
+  if (raw.trimStart().startsWith('[')) {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) throw new Error(`dataset ${datasetPath} parsed as JSON but is not an array`);
+    return { questions: arr as DatasetQuestion[], sha256 };
+  }
+  const out: DatasetQuestion[] = [];
+  let lineNo = 0;
+  for (const line of raw.split('\n')) {
+    lineNo++;
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line) as DatasetQuestion);
+    } catch (err: any) {
+      throw new Error(`dataset ${datasetPath}:${lineNo}: ${err.message ?? err}`);
+    }
+  }
+  return { questions: out, sha256 };
 }

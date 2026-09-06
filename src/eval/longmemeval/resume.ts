@@ -164,3 +164,98 @@ export function seedBucketsFromRows(
   }
   return res;
 }
+
+/**
+ * `--resume-from`: the question_ids already answered in `resumePath`. Rows
+ * whose `hypothesis` is empty AND carry an `error` are NOT counted — those
+ * are previous-run failures that should be retried. Missing file → empty set
+ * (a first run with the flag behaves exactly like no flag).
+ */
+export function loadResumeSet(resumePath: string): Set<string> {
+  const done = new Set<string>();
+  if (!existsSync(resumePath)) return done;
+  let lineNo = 0;
+  for (const line of readFileSync(resumePath, 'utf8').split('\n')) {
+    lineNo++;
+    if (!line.trim()) continue;
+    let row: { question_id?: string; hypothesis?: string; error?: string };
+    try {
+      row = JSON.parse(line);
+    } catch {
+      process.stderr.write(`[longmemeval] resume: skipping corrupt line ${lineNo}\n`);
+      continue;
+    }
+    if (typeof row.question_id !== 'string') continue;
+    if (row.error && (!row.hypothesis || row.hypothesis === '')) continue;
+    done.add(row.question_id);
+  }
+  return done;
+}
+
+/**
+ * Seed per-type buckets from an existing output file so the by_type_summary
+ * is cumulative across resume runs. Both metrics are RECOMPUTED from each
+ * row's retrieved ids + the dataset's gold (`goldByQid`); nothing is trusted
+ * from the row's own recall fields. Summary rows and error rows are skipped.
+ */
+export function seedRecallByTypeFromFile(
+  outputPath: string,
+  buckets: Record<string, RecallBucket>,
+  ctx: { goldByQid: ReadonlyMap<string, readonly string[]>; k: number; includeAbstention?: boolean },
+): SeedResult {
+  return seedBucketsFromRows(readJsonlRows(outputPath), buckets, {
+    goldByQid: ctx.goldByQid,
+    k: ctx.k,
+    includeAbstention: ctx.includeAbstention ?? false,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Silent-degradation classification (shared by the live row and the resume re-scan)
+// ---------------------------------------------------------------------------
+
+/** The `search_meta` shape the harness stamps on every row (also read back on resume). */
+export interface RowSearchMeta {
+  vector_enabled?: boolean;
+  degraded?: Array<{ stage?: string }>;
+}
+
+const VECTOR_DEGRADED_STAGES: ReadonlySet<string> = new Set(['embed_unavailable', 'embed_timeout']);
+const EXPANSION_FAILED_STAGES: ReadonlySet<string> = new Set(['expansion_failed', 'expansion_partial']);
+const RERANKER_SKIPPED_STAGES: ReadonlySet<string> = new Set(['reranker_skipped', 'rerank_passthrough']);
+
+/**
+ * Silent-degradation classifier shared by the live row and the resume
+ * re-scan. hybridSearch swallows an embed/expansion failure into `degraded`
+ * and scores the row keyword-only — for a like-for-like receipt that row is
+ * NOT the configured arm, so the run must not exit 0.
+ */
+export function classifyDegradation(meta: RowSearchMeta | undefined, opts: { keywordOnly: boolean; expansion: boolean }): {
+  rerankerSkipped: boolean; vectorDegraded: boolean; expansionFailed: boolean;
+} {
+  const stages = new Set((meta?.degraded ?? []).map(d => d.stage).filter((x): x is string => typeof x === 'string'));
+  const has = (set: ReadonlySet<string>) => [...stages].some(st => set.has(st));
+  return {
+    rerankerSkipped: has(RERANKER_SKIPPED_STAGES),
+    vectorDegraded: !opts.keywordOnly && (meta?.vector_enabled === false || has(VECTOR_DEGRADED_STAGES)),
+    expansionFailed: !opts.keywordOnly && opts.expansion && has(EXPANSION_FAILED_STAGES),
+  };
+}
+
+
+/** Re-scan prior rows (resume) for the three silent-degradation counters. */
+export function countDegradation(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  opts: { keywordOnly: boolean; expansion: boolean },
+): { rerankerSkipped: number; vectorDegraded: number; expansionFailed: number } {
+  const out = { rerankerSkipped: 0, vectorDegraded: 0, expansionFailed: 0 };
+  for (const row of rows) {
+    if (row.kind === 'by_type_summary' || typeof row.question_id !== 'string') continue;
+    const c = classifyDegradation(row.search_meta as RowSearchMeta | undefined, opts);
+    if (c.rerankerSkipped) out.rerankerSkipped++;
+    if (c.vectorDegraded) out.vectorDegraded++;
+    if (c.expansionFailed) out.expansionFailed++;
+  }
+  return out;
+}
+

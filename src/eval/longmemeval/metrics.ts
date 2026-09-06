@@ -226,6 +226,11 @@ export interface RecallTypeStats {
   any_rate: number | null;
 }
 
+/**
+ * Minimum shape of the judged-answer block on the summary. The full block is
+ * `QaAccuracyBlock` (./qa-accuracy.ts) — a type alias, so it satisfies this
+ * index-signature interface structurally.
+ */
 export interface QaAccuracySummary {
   judged: number;
   correct: number;
