@@ -39,6 +39,16 @@
   motivated R1). **Context:** sibling `eval/runner/cat13b-source-swamp.ts`
   with `--reranker on|off` pins; publish both rows in the next report.
   **Effort:** S. **Priority:** P3.
+- [ ] **P3 — `scripts/r1-namedthing-rerank-ab.ts`: refuse an implicit embedder and print the fixture set in the verdict header.**
+  **What:** without `GBRAIN_EMBEDDING_MODEL` the script fell back to the
+  gateway's stale ZeroEntropy default and exit-2'd at auth after reserving
+  spend; without `--relational --limit 10` it silently ran the 12 core
+  questions at page size 3 and printed a PASS that was not the receipt anyone
+  wanted. **Fix:** require an explicit embedder (env or flag) and put
+  `questions: N (core M + relational K) · limit L` in the header line and the
+  receipt's `verdict`. **Why:** the wave produced two misfired receipts before
+  the right one; a receipt producer should not have a silent default shape.
+  **Effort:** S. **Priority:** P3.
 - [ ] **P3 — LoCoMo + BEAM lanes on `src/eval/shared/`.**
   **What:** two more long-conversation memory benchmarks, each a loader
   (dataset → sessions + questions) plus a thin runner over the dataset-agnostic
