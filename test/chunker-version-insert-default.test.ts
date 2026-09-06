@@ -1,6 +1,7 @@
 /** Chunk safety versions are minted by full imports, never body-only writes. */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { MARKDOWN_CHUNKER_VERSION } from '../src/core/chunkers/recursive.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import type { ChunkInput } from '../src/core/types.ts';
@@ -10,11 +11,17 @@ const protectedBody = 'Public version fixture.\n<!--- gbrain:takes:begin -->\nPR
 describe('verified chunk safety versions', () => {
   let engine: PGLiteEngine;
   beforeAll(async () => {
+    // Pin the embedding shape this file hard-codes (1536-d vectors below) instead
+    // of inheriting whatever a previous file in the shard left on the gateway —
+    // initSchema sizes the vector columns from the gateway, and a leaked 1280-d
+    // config turned every upsert here into "expected 1280 dimensions, not 1536".
+    resetGateway();
+    configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, env: { OPENAI_API_KEY: 'sk-test' } });
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
   });
-  afterAll(async () => { await engine.disconnect(); }, 30_000);
+  afterAll(async () => { await engine.disconnect(); resetGateway(); }, 30_000);
 
   async function version(slug: string): Promise<number> {
     const rows = await engine.executeRaw<{ chunker_version: number }>('SELECT chunker_version FROM pages WHERE slug = $1', [slug]);
