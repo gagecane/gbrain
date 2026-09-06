@@ -80,6 +80,19 @@ command runs through `scripts/eval-spend-guard.sh 75 <estimate> -- …`
   autocut cut that pins strict recall near 80%, so it is published as
   confounded and does not justify a flip. Bundles stay `null`; the knob ships
   for operators; CRAG-style conditional expansion is filed.
+- **Final release-configuration arm (gate D11):** `balanced`, reranker on,
+  autocut off (bundle), relational pin 3, metadata gate lexical, on the
+  release SHA: **449/470 (95.53%)**, any-hit 469/470, mean 4.89 distinct
+  sessions; byte-identical per question to A2 (the pin never fires on this
+  corpus and the gate changes no top-5); vs the pre-wave default (A4) +68 / −0
+  on the 430, every type gains or holds → recall gate PASS. NamedThingBench in
+  the same shape (`r1-namedthing-release-receipt.json`): core hit@1 10→11,
+  relational 21/27 both arms, 0 losses; BrainBench PASS (same-hash); retrieval
+  canary PASS → **gate D11 PASS**, no flip reverted.
+- **`tokenmax` as released (legacy expansion weight, reranker on, autocut
+  off; frozen A3 variants):** 436/470 (92.77%), +2 / −15 vs the balanced
+  release path (multi-session −7, temporal −5); +186 / −5 vs A3. The
+  CHANGELOG "If you run tokenmax" warning quotes this row.
 - **Autocut floor replay (A4 `--capture-pool` capture; floors off / 0.10 /
   0.20 / 0.35 / 0.50 / 0.65 / 0.80; `--validate-live 0.35` reproduced all
   500 live decisions):** A4 (shipped default: reranker on, autocut 0.35)

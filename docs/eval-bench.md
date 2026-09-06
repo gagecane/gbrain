@@ -380,81 +380,98 @@ the same command with `--reranker on --autocut off`, the release default; add
 
 ### Current measured result
 
-**93.19% session-level `recall_all@5` (438/470), reranker off**: the
-like-for-like row for comparison against other systems, on LongMemEval's
-official retrieval metric. A question counts only when EVERY gold session
-appears among the top-5 distinct retrieved sessions. Retrieval only, no
-reader model. Any-hit `recall_any@5` (at least one gold session in the top 5)
-is 98.72% and is a diagnostic, not the headline; nDCG_any@5 is 93.32%.
+**95.53% session-level `recall_all@5` (449/470) on the release default path**
+(`balanced`: `voyage:rerank-2.5` on, autocut off, relational pin 3, metadata
+gate lexical) and **93.40% (439/470) with the reranker off**, the like-for-like
+row against systems that run no reranker. LongMemEval's official retrieval
+metric: a question counts only when EVERY gold session appears among the top-5
+distinct retrieved sessions; retrieval only, no reader model. Any-hit
+`recall_any@5` is 99.79% / 98.72% and is a diagnostic, not the headline.
 
-With the default reranker `voyage:rerank-2.5` on (the default path, what
-`balanced` and `tokenmax` run), **95.32% `recall_all@5` (448/470)**; any-hit
-99.79%, diagnostic. Same run, same 470 scored questions.
+- **Dataset:** `longmemeval_s_cleaned.json`, the cleaned September 2025
+  revision of the S split (`xiaowu0162/longmemeval-cleaned`, sha256
+  `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442`). 500
+  questions; the 30 abstention (`_abs`) questions are excluded from the
+  recall denominator, as the official `print_retrieval_metrics.py` does, so
+  470 are scored. The ceiling at k=5 is 99.4%: 3 questions carry 6 gold
+  sessions and cannot fit in a top-5 list.
+- **Measured:** 2026-09-06 at gbrain v0.48.3.0 with `gbrain eval longmemeval`
+  (this repo; the sibling runner's 2026-09-02 receipt is reproduced by the A1
+  parity row: 439 vs 438 of 470, 469 of 470 rows agree per question, any-hit
+  identical), k=5, embedder `openai:text-embedding-3-large` at 1536 dims
+  through one content-addressed embedding cache (every arm after A1 ran with
+  0 misses, so all arms fused byte-identical vectors), single run, 0 errors
+  in every arm. Knob decisions were made on the 430 questions outside the
+  committed seed-42 dev slice (`evals/longmemeval/dev-slice-seed42.txt`); the
+  470 column is the comparable one.
 
-- **Dataset:** `longmemeval_s`, the cleaned September 2025 revision of the S
-  split (`xiaowu0162/longmemeval-cleaned`). 500 questions; the 30 abstention
-  (`_abs`) questions are excluded from the recall denominator, as the
-  official `print_retrieval_metrics.py` does, so 470 are scored. The ceiling
-  at k=5 is 99.4%: 3 questions carry 6 gold sessions and cannot fit in a
-  top-5 list.
-- **Measured:** 2026-09-02 at gbrain v0.48.2.0 (commit `172df271`), single
-  run, k=5, search mode `balanced`, autocut off, reranker off except the two
-  rerank arms (`voyage:rerank-2.5`), embedder
-  `openai:text-embedding-3-large` at 1536 dimensions. Harness: the
-  gbrain-evals runner (`main` at `29e9ac9`, pinned to that gbrain commit);
-  the official metric is recomputed from the per-question rows by
-  `eval/runner/longmemeval-aggregate.ts`. p50 3.7 s / p99 6.3 s per question,
-  0 errors. Distinct sessions in the top 5: 5 on 422 questions, 4 on 47, 3 on
-  1 (mean 4.90).
+"Paired" is per question against A1 (reranker off): questions this arm gets
+right that A1 missed / questions it loses that A1 had.
 
-All five arms come from that same run (470 scored, k=5, 0 errors in every
-arm). "Paired vs hybrid" is per-question against the hybrid
-row: questions this arm gets right that hybrid missed / questions it loses
-that hybrid had. Latency is per question.
+| Arm | `recall_all@5` (470) | `recall_any@5` | Mean distinct sessions in top 5 | Paired vs A1 | On the 430 |
+|---|---|---|---|---|---|
+| A1 hybrid, reranker off, autocut off (like-for-like row) | **93.40%** (439/470) | 98.72% | 4.90 | +0 / −0 | 403/430 |
+| A2 hybrid + reranker (`voyage:rerank-2.5`), autocut off | **95.53%** (449/470) | 99.79% | 4.89 | +18 / −8 | 412/430 |
+| A3 hybrid + LLM multi-query expansion, legacy weighting (`--expansion`) | **54.26%** (255/470) | 84.89% | 5.00 | +3 / −187 | 231/430 |
+| A4 the default that shipped before v0.48.3.0 (reranker on, autocut 0.35) | **80.64%** (379/470) | 99.36% | 2.36 | +16 / −76 | 344/430 |
+| A3′ hybrid + expansion at `expansion_variant_budget` 0.25, reranker off | **83.83%** (394/470) | 97.45% | 5.00 | +3 / −48 | 360/430 |
+| A3′R `tokenmax` + expansion at 0.25, reranker on, autocut 0.35 | **81.06%** (381/470) | 99.15% | 2.30 | +12 / −10 vs A4 | 347/430 |
+| `tokenmax` as released (legacy expansion, reranker on, autocut off) | **92.77%** (436/470) | 99.57% | 4.19 | +2 / −15 vs A2 | 400/430 |
+| **release default** (`balanced`: reranker on, autocut off, pin 3, gate lexical) | **95.53%** (449/470) | 99.79% | 4.89 | +18 / −8 | 412/430 |
 
-| Arm | `recall_all@5` | `recall_any@5` | nDCG_any@5 | Mean distinct sessions in top 5 | Paired vs hybrid | p50 / p99 |
-|---|---|---|---|---|---|---|
-| hybrid (reranker off; like-for-like row) | **93.19%** (438/470) | 98.72% | 93.32% | 4.90 | +0 / -0 | 3.7 s / 6.3 s |
-| hybrid + LLM multi-query expansion (`--expansion`, what `tokenmax` runs) | **54.89%** (258/470) | 86.60% | 71.68% | 5.00 | +3 / -183 | 5.1 s / 8.0 s |
-| hybrid-sessdiv (over-fetch 3x, keep top-5 distinct sessions; from the 2026-09-02 run, no in-repo arm) | **93.40%** (439/470) | 98.72% | 93.38% | 5.00 | +1 / -0 | 3.7 s / 6.4 s |
-| hybrid + rerank (`voyage:rerank-2.5`, the default path) | **95.32%** (448/470) | 99.79% | 95.77% | 4.89 | +18 / -8 | 3.8 s / 6.3 s |
-| hybrid-sessdiv + rerank (from the 2026-09-02 run, no in-repo arm) | **95.53%** (449/470) | 99.79% | 95.82% | 5.00 | +19 / -8 | 3.8 s / 6.3 s |
+`recall_all@5` by question type, same run:
 
-`recall_all@5` by question type, same run, same five arms:
-
-| Question type | n | hybrid | hybrid + expansion | hybrid-sessdiv | hybrid + rerank | hybrid-sessdiv + rerank |
-|---|---|---|---|---|---|---|
-| knowledge-update | 72 | 98.6% (71) | 62.5% (45) | 98.6% (71) | 100.0% (72) | 100.0% (72) |
-| multi-session | 121 | 92.6% (112) | 34.7% (42) | 92.6% (112) | 92.6% (112) | 92.6% (112) |
-| single-session-assistant | 56 | 100.0% (56) | 82.1% (46) | 100.0% (56) | 100.0% (56) | 100.0% (56) |
-| single-session-preference | 30 | 96.7% (29) | 80.0% (24) | 96.7% (29) | 100.0% (30) | 100.0% (30) |
-| single-session-user | 64 | 98.4% (63) | 78.1% (50) | 98.4% (63) | 100.0% (64) | 100.0% (64) |
-| temporal-reasoning | 127 | 84.3% (107) | 40.2% (51) | 85.0% (108) | 89.8% (114) | 90.6% (115) |
-| **all scored** | **470** | **93.19% (438)** | **54.89% (258)** | **93.40% (439)** | **95.32% (448)** | **95.53% (449)** |
+| Question type | n | A1 | A2 / release default | A3 | A4 | A3′ | `tokenmax` as released |
+|---|---|---|---|---|---|---|---|
+| knowledge-update | 72 | 98.6% (71) | 100.0% (72) | 61.1% (44) | 73.6% (53) | 90.3% (65) | 100.0% (72) |
+| multi-session | 121 | 92.6% (112) | 92.6% (112) | 38.0% (46) | 73.6% (89) | 75.2% (91) | 86.8% (105) |
+| single-session-assistant | 56 | 100.0% (56) | 100.0% (56) | 82.1% (46) | 100.0% (56) | 100.0% (56) | 100.0% (56) |
+| single-session-preference | 30 | 96.7% (29) | 100.0% (30) | 66.7% (20) | 100.0% (30) | 100.0% (30) | 96.7% (29) |
+| single-session-user | 64 | 98.4% (63) | 100.0% (64) | 76.6% (49) | 100.0% (64) | 96.9% (62) | 100.0% (64) |
+| temporal-reasoning | 127 | 85.0% (108) | 90.6% (115) | 39.4% (50) | 68.5% (87) | 70.9% (90) | 86.6% (110) |
+| **all scored** | **470** | **93.40% (439)** | **95.53% (449)** | **54.26% (255)** | **80.64% (379)** | **83.83% (394)** | **92.77% (436)** |
 
 What the arms say:
 
-- **The reranker is worth +2.13 points on the default path** (93.19%
-  to 95.32%, +18 / -8 paired). Every gain is outside multi-session, which the
-  reranker leaves at 112/121 both ways; the largest is temporal-reasoning
-  (107 to 114 of 127). Any-hit climbs to 99.79%, so the reranker is promoting
-  sessions already in the candidate pool rather than recalling new ones.
-- **LLM multi-query expansion at equal weight is harmful at k=5.** 54.89%
-  against 93.19%, +3 / -183 paired, worse in every question type, zero
-  expansion errors: variant lists fusing at the same RRF weight as the
-  original outvote it. The mechanism is now a knob,
-  `search.expansion_variant_budget` — the total RRF weight the variant lists
-  share (`docs/architecture/RETRIEVAL.md`, "Multi-query expansion"). Every
-  bundle still defaults to `null` (legacy equal weight, the row above), so
-  `tokenmax` users get this path until a receipted budget flips the default.
-  Sweep it with `--expansion --expansion-replay <recorded.ndjson>
-  --expansion-variant-budget <b>` so every cell differs only in the budget.
-  `tokenmax` was not measured with the reranker in this run.
-- **Slot starvation is not the miss class.** Session-diverse over-fetch
-  fills every top-5 to 5.00 distinct sessions (plain hybrid returned fewer
-  than 5 on 48 of 470 questions) and adds exactly one question, with or
-  without the reranker (+1 / -0 and 95.32% to 95.53%). The remaining misses
-  are ranking misses, not duplicate sessions eating top-5 slots.
+- **The release default IS the reranker row.** 449/470 is byte-identical per
+  question to A2: on this corpus the relational pin never fires (no relational
+  intent) and the metadata gate changes no top-5 (chat sessions carry no
+  backlinks or graph edges). The reranker is worth +2.13 points over A1
+  (+18 / −8 paired), every gain outside multi-session (112/121 both ways),
+  the largest in temporal-reasoning (108 → 115 of 127). Any-hit rises to
+  99.79%: the reranker promotes sessions already in the pool.
+- **Autocut, not the reranker, was the regression in the old default.** A4
+  vs A2 is +0 / −68 on the 430, the losses entirely in the three types whose
+  questions need more than one session (multi-session −22, temporal −27,
+  knowledge-update −19); any-hit is unchanged. Replaying every floor from A4's
+  captured post-rerank pool found no floor within two questions of "off" on
+  either seeded half, so autocut is off in `balanced` and `tokenmax`
+  (`docs/architecture/RETRIEVAL.md`, "Autocut"). The mean returned window
+  shrank from 3256 to 1633 estimated tokens under the cut — that saving was
+  paid for with the second gold session.
+- **LLM multi-query expansion is still harmful at k=5, and the budget knob is
+  real but not enough.** Legacy weighting (one full RRF vote per variant):
+  255/470, +3 / −187. `search.expansion_variant_budget` shares one total
+  weight across the variants; replaying the SAME recorded variants, the
+  dev-slice sweep climbs monotonically as the budget shrinks (24 → 26 → 30 →
+  34 of 40 at 2.0 → 1.0 → 0.5 → 0.25; plain hybrid 36) and A3′ at 0.25
+  recovers 139 questions over A3 — yet still trails A1 by 43 on the 430, so
+  every bundle keeps `null` and the knob is an operator lever. A3′R (tokenmax
+  under the old autocut) equals A4 only because the cut pins both near 80%.
+  Conditional expansion (expand only when the original query's evidence is
+  weak) is the filed next mechanism.
+- **`tokenmax` as released scores 436/470 (92.77%).** With the reranker on
+  and autocut off, expansion costs thirteen questions against `balanced`
+  (+2 / −15: multi-session −7, temporal −5) plus the Haiku call per query.
+  `gbrain config set search.mode balanced` keeps the reranker and drops
+  expansion; `gbrain config set search.expansion_variant_budget 0.25`
+  recovers most of the loss if you keep it on.
+- **Slot starvation is not the miss class** (from the 2026-09-02 sibling run;
+  no in-repo arm yet): session-diverse over-fetch fills every top-5 to 5.00
+  distinct sessions and adds exactly one question (+1 / −0, with or without
+  the reranker). The remaining misses are ranking misses among sessions that
+  are all in the pool — the diagnosis that decided Phase B of the ranker
+  wave (`docs/eval/FIX_WAVE_BASELINES.md`).
 
 How to read other systems' numbers. On the strict metric on this dataset we
 found no published score above 93.19%. The closest strict comparisons are

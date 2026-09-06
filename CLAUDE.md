@@ -213,6 +213,7 @@ project resolves through `src/core/search/mode.ts`.
 | `expansion` (LLM multi-query) | false          | false      | **true**       |
 | `relationalRetrieval`         | false          | **true**   | **true**       |
 | `metadata_boost_gate`         | lexical        | lexical    | lexical        |
+| `autocut` (rerank-cliff cut)  | off            | off        | off            |
 | `searchLimit` default         | 10             | 25         | 50             |
 
 **Cost anchors (downstream agent input cost — gbrain itself is rounding error).**

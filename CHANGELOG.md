@@ -82,13 +82,57 @@ gbrain config set search.metadata_boost_gate always   # pre-wave boosts
 
 ### Measured
 
-<!-- TBD: arms table (A1, A2, A3, A3′, A3′R, A4, final release configuration), per-type table, paired deltas on the 430 and the 470, autocut replay table, judged QA row with disclosure. Fill from ~/gbrain-lme-receipts once Phase A/C/D land. -->
+Seven retrieval arms on the public LongMemEval benchmark, all from
+`gbrain eval longmemeval` in this repo on 2026-09-06 (the in-repo harness is
+the receipt producer from this release on). Metric: LongMemEval's official
+session-level `recall_all@5` (every gold session inside the top-5 distinct
+retrieved sessions; retrieval only, no reader model). Dataset:
+`longmemeval_s_cleaned.json` (sha256 `d6f21ea9…8a3442`), 500 questions, 30
+abstention questions excluded, 470 scored; embedder
+`openai:text-embedding-3-large` at 1536 dims through one shared embedding
+cache (every arm after the first: 0 misses), k=5, single run, 0 errors in
+every arm. Decisions were made on the 430 questions outside the seed-42 dev
+slice; the 470 column is published for comparability. "Paired" is per
+question against the reranker-off hybrid row (A1).
 
-- **Harness parity.** The in-repo harness reproduces the 2026-09-02
-  gbrain-evals receipt on the same corpus: 439/470 strict `recall_all@5`
-  (93.40%) with reranker and autocut off against 438/470, 469 of 470 rows
-  agreeing per question, any-hit identical at 464/470; with the reranker on,
-  449/470 (95.53%) with the same +18 / −8 paired pattern as the receipt.
+| Arm | `recall_all@5` (470) | `recall_any@5` | Paired vs A1 (470) | On the 430 |
+|---|---|---|---|---|
+| A1 hybrid, reranker off, autocut off (parity row) | **93.40%** (439/470) | 98.72% | +0 / −0 | 403/430 |
+| A2 hybrid + reranker, autocut off | **95.53%** (449/470) | 99.79% | +18 / −8 | 412/430 |
+| A3 hybrid + LLM expansion at the legacy weighting | **54.26%** (255/470) | 84.89% | +3 / −187 | 231/430 |
+| A4 the default that shipped before this release (reranker on, autocut 0.35) | **80.64%** (379/470) | 99.36% | +16 / −76 | 344/430 |
+| A3′ hybrid + expansion at budget 0.25, reranker off | **83.83%** (394/470) | 97.45% | +3 / −48 | 360/430 |
+| A3′R tokenmax + expansion at 0.25, reranker on, autocut 0.35 | **81.06%** (381/470) | 99.15% | +12 / −10 vs A4 | 347/430 |
+| tokenmax as released (legacy expansion, reranker on, autocut off) | **92.77%** (436/470) | 99.57% | +2 / −15 vs A2 | 400/430 |
+| **release default (`balanced`: reranker on, autocut off, relational pin 3, metadata gate lexical)** | **95.53%** (449/470) | 99.79% | +18 / −8 | 412/430 |
+
+By question type (`recall_all@5`, release default): knowledge-update 100%
+(72/72), multi-session 92.6% (112/121), single-session-assistant 100%
+(56/56), single-session-preference 100% (30/30), single-session-user 100%
+(64/64), temporal-reasoning 90.6% (115/127). The full per-arm per-type table
+is in `docs/eval-bench.md`.
+
+- **The release default is the reranker-on row.** 449/470 is byte-identical
+  per question to A2: on this corpus the relational pin never fires (no
+  relational intent) and the metadata gate changes no top-5 (chat sessions
+  carry no backlinks or graph edges), so the release path is "reranker on,
+  autocut off" — +70 / −0 against the default that shipped before this
+  release, and the highest strict `recall_all@5` gbrain has published.
+- **Autocut was the regression, not the reranker.** A4 vs A2 is +0 / −68
+  on the 430: the cut kept the best session and dropped the rest. See rule
+  R2 below.
+- **`tokenmax` is measured with the reranker for the first time.** As
+  released it scores 436/470, thirteen questions behind `balanced`
+  (+2 / −15): the reranker repairs most of what equal-weight expansion
+  breaks (A3 255 → 436), and the budget knob does not close the remainder
+  (rule A, below). `balanced` remains the small-k recommendation.
+
+
+- **Harness parity.** A1 reproduces the 2026-09-02 gbrain-evals receipt on
+  the same corpus (439/470 against 438/470; 469 of 470 rows agree per
+  question; any-hit identical at 464/470; one temporal question flipped to a
+  hit without a shared embedding cache), and A2 matches the receipt's
+  reranker row (449 vs 448) with the same +18 / −8 paired pattern.
 - **Relational pin (rule R1 closeout).** NamedThingBench paired reranker on
   vs off: the 11 entity-core questions lose nothing either way; the 39
   graph-relationship questions collapsed with the reranker on (hit@1 21 → 3,
